@@ -47,6 +47,9 @@ int parse_config(const char *filename, config_t *pconfig) {
             pconfig->port = atoi(value);
         } else if (strcmp(key, "thread_count") == 0) {
             pconfig->thread_count = atoi(value);
+        } else if (strcmp(key, "log_path") == 0) {
+            strncpy(pconfig->log_path, value, sizeof(pconfig->log_path) - 1);
+            pconfig->log_path[sizeof(pconfig->log_path) - 1] = '\0';
         }
     }
 
@@ -77,6 +80,8 @@ int read_config(int argc, char *argv[], config_t *pconfig) {
         pconfig->server_ip[sizeof(pconfig->server_ip) - 1] = '\0';
         pconfig->port = atoi(argv[2]);
         pconfig->thread_count = atoi(argv[3]);
+        strncpy(pconfig->log_path, "server.log", sizeof(pconfig->log_path) - 1);
+        pconfig->log_path[sizeof(pconfig->log_path) - 1] = '\0';
     } else {
         printf("args error!\n");
         return -1;

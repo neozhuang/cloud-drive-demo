@@ -1,10 +1,13 @@
 #ifndef __CONFIG_H__
 #define __CONFIG_H__
 
+#include "common.h"
+
 typedef struct {
     char server_ip[16];  // IPv4 最长 15 字符
     int port;          // 端口号
     int thread_count;   // 线程池线程数
+    char log_path[PATH_MAX]; // 日志文件路径
 } config_t;
 
 // 去除字符串首尾空白字符

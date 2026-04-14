@@ -7,15 +7,52 @@
 #include "../include/packet.h"
 #include "../include/task_helper.h"
 #include "../include/transmit_data.h"
+#include "../include/log.h"
 
 int do_task(node_t * p_node){
     char session_path[PATH_MAX] = {0};
+    char username[32] = "anonymous";
+    char client_ip[INET_ADDRSTRLEN] = "unknown";
+    int client_port = -1;
+    int op_status = 0;
+    const char *detail = "success";
     
     // 从会话获取当前路径
     session_t* session = session_get(p_node->netfd);
+    if(session == NULL) {
+        log_operation_event(p_node->netfd,
+                            username,
+                            client_ip,
+                            client_port,
+                            session_path,
+                            p_node->type,
+                            p_node->content,
+                            -1,
+                            "session not found");
+        return -1;
+    }
+
+    strncpy(username, session->username, sizeof(username) - 1);
+    username[sizeof(username) - 1] = '\0';
+    strncpy(client_ip, session->client_ip, sizeof(client_ip) - 1);
+    client_ip[sizeof(client_ip) - 1] = '\0';
+    client_port = session->client_port;
+
     if(session->is_authenticated == 0) {
         // 用户未认证，直接返回错误
-        return send_text_response(p_node->netfd, p_node->type, -1, "Please login first.\n");
+        op_status = -1;
+        detail = "please login first";
+        send_text_response(p_node->netfd, p_node->type, -1, "Please login first.\n");
+        log_operation_event(p_node->netfd,
+                            username,
+                            client_ip,
+                            client_port,
+                            session_path,
+                            p_node->type,
+                            p_node->content,
+                            op_status,
+                            detail);
+        return -1;
     }
     if(session != NULL && session->current_path[0] != '\0') {
         strcpy(session_path, session->current_path);
@@ -26,52 +63,77 @@ int do_task(node_t * p_node){
         // 路径已经在add_task中更新到会话，这里不需要额外操作
         break;
     case PWD:
-        pwd_dir(p_node->netfd, session_path);
+        op_status = pwd_dir(p_node->netfd, session_path);
         break;
     case CD:
-        cd_dir(p_node->netfd, p_node->content, session_path);
+        op_status = cd_dir(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "change directory success" : "change directory failed";
         break;
     case LS:    
-        ls_dir(p_node->netfd, p_node->content, session_path);
+        op_status = ls_dir(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "list directory success" : "list directory failed";
         break;
     case LL:
-        ll_dir(p_node->netfd, p_node->content, session_path);
+        op_status = ll_dir(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "list detail success" : "list detail failed";
         break;
     case MKDIR:
-        mk_dir(p_node->netfd, p_node->content, session_path);
+        op_status = mk_dir(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "mkdir success" : "mkdir failed";
         break;
     case RMDIR: 
-        rm_dir(p_node->netfd, p_node->content, session_path);
+        op_status = rm_dir(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "rmdir success" : "rmdir failed";
         break;
     case RM:
-        rm_file(p_node->netfd, p_node->content, session_path);
+        op_status = rm_file(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "rm success" : "rm failed";
         break;
     case PUTS:
-        puts_file_server(p_node->netfd, p_node->content, session_path);
+        op_status = puts_file_server(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "upload success" : "upload failed";
         // 上传任务完成 添加监听
         add_epoll_readfd(p_node->epfd, p_node->netfd);
         break;
     case GETS:
-        gets_file_server(p_node->netfd, p_node->content, session_path);
+        op_status = gets_file_server(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "download success" : "download failed";
         break;
     case TREE:  
-        tree_dir(p_node->netfd, p_node->content, session_path);
+        op_status = tree_dir(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "tree success" : "tree failed";
         break;
     case CAT:   
-        cat_file(p_node->netfd, p_node->content, session_path);
+        op_status = cat_file(p_node->netfd, p_node->content, session_path);
+        detail = op_status == 0 ? "cat success" : "cat failed";
         break;
     case CLIENT_EXIT:
-        client_exit(p_node->netfd);
+        op_status = client_exit(p_node->netfd);
+        detail = "client exit";
         printf("Client on netfd %d is exiting...\n", p_node->netfd);
         // 这里不直接close netfd，等到主循环检测到socket关闭时再进行清理
         break;
     case NOTCMD:
         notcmd(p_node->netfd);
+        op_status = -1;
+        detail = "invalid command";
         printf("Invalid command!\n");
         break;
     default:
+        op_status = -1;
+        detail = "unknown command type";
         break;
     }
+
+    log_operation_event(p_node->netfd,
+                        username,
+                        client_ip,
+                        client_port,
+                        session_path,
+                        p_node->type,
+                        p_node->content,
+                        op_status,
+                        detail);
     return 0;
 }
 
@@ -119,7 +181,7 @@ int cd_dir(int netfd, const char * cd_dir, const char * session_path) {
     }
     send_packet(netfd, &packet);
 
-    return 0;
+    return flag;
 }
 
 int ls_dir(int netfd, const char * ls_dir, const char * session_path) {
@@ -173,7 +235,7 @@ int ls_dir(int netfd, const char * ls_dir, const char * session_path) {
     }
     packet.length = strlen(packet.content);
     send_packet(netfd, &packet);
-    return 0;
+    return flag;
 }
 
 int ll_dir(int netfd, const char * ll_dir, const char * session_path) {
@@ -243,7 +305,7 @@ int ll_dir(int netfd, const char * ll_dir, const char * session_path) {
 
     packet.length = strlen(packet.content);
     send_packet(netfd, &packet);
-    return 0;
+    return flag;
 }
 
 int mk_dir(int netfd, const char * mk_dir, const char * session_path) {
@@ -262,7 +324,7 @@ int mk_dir(int netfd, const char * mk_dir, const char * session_path) {
     packet.status = flag;
 
     send_packet(netfd, &packet);
-    return 0;
+    return flag;
 }
 
 int rm_dir(int netfd, const char * rm_dir, const char * session_path) {
@@ -280,7 +342,7 @@ int rm_dir(int netfd, const char * rm_dir, const char * session_path) {
     packet.type = RMDIR;
     packet.status = flag;
     send_packet(netfd, &packet);
-    return 0;
+    return flag;
 }
 
 int rm_file(int netfd, const char * rm_file, const char * session_path) {
@@ -298,7 +360,7 @@ int rm_file(int netfd, const char * rm_file, const char * session_path) {
     packet.type = RM;
     packet.status = flag;
     send_packet(netfd, &packet);
-    return 0;
+    return flag;
 }
 
 int tree_dir(int netfd, const char * tree_dir, const char * session_path) 

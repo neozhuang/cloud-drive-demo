@@ -38,6 +38,11 @@ session_t* session_get_or_create(int netfd) {
     
     sessions[session_count].netfd = netfd;
     strcpy(sessions[session_count].current_path, ""); // 初始为空路径
+    strcpy(sessions[session_count].username, "anonymous");
+    strcpy(sessions[session_count].client_ip, "unknown");
+    sessions[session_count].client_port = -1;
+    sessions[session_count].connect_time = 0;
+    sessions[session_count].last_active_time = 0;
     session_t* new_session = &sessions[session_count];
     session_count++;
     
@@ -76,6 +81,36 @@ int session_update_path(int netfd, const char* new_path) {
     session->current_path[PATH_MAX - 1] = '\0'; // 确保终止
     pthread_mutex_unlock(&session_mutex);
     
+    return 0;
+}
+
+int session_set_connection_info(int netfd, const char *client_ip, int client_port, time_t connect_time) {
+    session_t* session = session_get_or_create(netfd);
+    if (session == NULL) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&session_mutex);
+    if(client_ip != NULL) {
+        strncpy(session->client_ip, client_ip, sizeof(session->client_ip) - 1);
+        session->client_ip[sizeof(session->client_ip) - 1] = '\0';
+    }
+    session->client_port = client_port;
+    session->connect_time = connect_time;
+    session->last_active_time = connect_time;
+    pthread_mutex_unlock(&session_mutex);
+    return 0;
+}
+
+int session_touch(int netfd, time_t active_time) {
+    session_t* session = session_get(netfd);
+    if (session == NULL) {
+        return -1;
+    }
+
+    pthread_mutex_lock(&session_mutex);
+    session->last_active_time = active_time;
+    pthread_mutex_unlock(&session_mutex);
     return 0;
 }
 

@@ -18,6 +18,7 @@
 #include "../include/do_task.h"
 #include "../include/transmit_data.h"
 #include "../include/user_auth.h"
+#include "../include/log.h"
 
 #define EVENTS_MAX 1024
 #define CLOUD_DRIVE_DIR "cloud-drive"
@@ -43,6 +44,16 @@ int main(int argc, char * argv[])
         return -1;
     }
 
+    if(log_init(config.log_path) < 0) {
+        perror("log_init");
+        return -1;
+    }
+    log_write(LOG_LEVEL_INFO, "SERVER", "server starting ip=%s port=%d thread_count=%d log_path=\"%s\"",
+              config.server_ip,
+              config.port,
+              config.thread_count,
+              config.log_path);
+
     pid_t pid;
     int listenfd;
     const char cloud_drive_dir[NAME_MAX] = CLOUD_DRIVE_DIR;
@@ -60,6 +71,7 @@ int main(int argc, char * argv[])
         signal(SIGUSR1, sig_handler);
         waitpid(pid, NULL, 0);
         printf("\nparent process exit.\n");
+        log_close();
         exit(0);
     }
 
@@ -112,14 +124,24 @@ int main(int argc, char * argv[])
         }
         for(int i = 0; i < nfds; ++i) {
             if(events[i].data.fd == listenfd) {
-                int netfd = accept(listenfd, NULL, NULL);
+                struct sockaddr_in client_addr;
+                socklen_t client_len = sizeof(client_addr);
+                memset(&client_addr, 0, sizeof(client_addr));
+                int netfd = accept(listenfd, (struct sockaddr *)&client_addr, &client_len);
                 ERROR_CHECK(netfd, -1, "accept");
-                printf("I am master, I got a netfd = %d\n", netfd);
+                char client_ip[INET_ADDRSTRLEN] = "unknown";
+                inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
+                int client_port = ntohs(client_addr.sin_port);
+                session_set_connection_info(netfd, client_ip, client_port, time(NULL));
+                log_connection_event("CONNECT", netfd, client_ip, client_port, "anonymous", "client connected");
                 add_epoll_readfd(epfd, netfd);
             }
             else if(events[i].data.fd == exit_pipe[0]) {
+                log_write(LOG_LEVEL_INFO, "SERVER", "server shutting down");
                 threadpool_stop(&threadpool);
                 threadpool_destroy(&threadpool);
+                session_destroy();
+                log_close();
                 printf("Master is going to exit.\n");
                 exit(0);
             }
@@ -134,14 +156,39 @@ int main(int argc, char * argv[])
 int add_task(block_queue_t* queue, int epfd, int netfd)
 {    
     packet_t packet;
+    session_t *session = session_get_or_create(netfd);
     if(recv_packet(netfd, &packet) == -1){
         // maybe client closed connection or error occurred, just close connection
         printf("\nconn %d is closed.\n", netfd);
+        if(session != NULL) {
+            long online_seconds = 0;
+            if(session->connect_time != 0) {
+                online_seconds = (long)(time(NULL) - session->connect_time);
+            }
+            log_connection_event("DISCONNECT",
+                                 netfd,
+                                 session->client_ip,
+                                 session->client_port,
+                                 session->username,
+                                 online_seconds > 0 ? "client closed connection" : "client disconnected");
+            if(online_seconds > 0) {
+                log_write(LOG_LEVEL_INFO,
+                          "SESSION",
+                          "netfd=%d user=%s client=%s:%d online_seconds=%ld",
+                          netfd,
+                          session->username[0] != '\0' ? session->username : "anonymous",
+                          session->client_ip,
+                          session->client_port,
+                          online_seconds);
+            }
+        }
         del_epoll_readfd(epfd, netfd);
         session_remove(netfd);  // 清理会话状态
         close(netfd);
         return 0;
     }
+
+    session_touch(netfd, time(NULL));
 
     // 特殊处理LOGIN命令（在主线程处理）
     if(packet.type == LOGIN) {
@@ -149,19 +196,41 @@ int add_task(block_queue_t* queue, int epfd, int netfd)
         char username[CONTENT_MAX];
         strncpy(username, packet.content, packet.length);
         username[packet.length] = '\0';
+        log_request_event(netfd,
+                          session != NULL ? session->username : "anonymous",
+                          session != NULL ? session->client_ip : "unknown",
+                          session != NULL ? session->client_port : -1,
+                          LOGIN,
+                          username);
         
         // 2. 接收密码包
         if(recv_packet(netfd, &packet) == -1) {
-            // 错误处理...
+            log_write(LOG_LEVEL_WARN,
+                      "AUTH",
+                      "netfd=%d user=%s client=%s:%d detail=\"password packet receive failed\"",
+                      netfd,
+                      username,
+                      session != NULL ? session->client_ip : "unknown",
+                      session != NULL ? session->client_port : -1);
+            return -1;
         }
         
         char password[CONTENT_MAX];
         strncpy(password, packet.content, packet.length);
         password[packet.length] = '\0';
-        //printf("password: %s\n", password);
         
         // 3. 验证用户
         int auth_result = user_auth(username, password, netfd);
+        session = session_get(netfd);
+        log_write(auth_result == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_WARN,
+                  "AUTH",
+                  "netfd=%d client=%s:%d user=%s status=%d detail=\"%s\"",
+                  netfd,
+                  session != NULL ? session->client_ip : "unknown",
+                  session != NULL ? session->client_port : -1,
+                  username,
+                  auth_result,
+                  auth_result == 0 ? "login success" : (auth_result == 1 ? "user not exist" : (auth_result == 2 ? "password incorrect" : "login failed")));
         
         // 4. 发送响应
         packet_t response;
@@ -172,6 +241,13 @@ int add_task(block_queue_t* queue, int epfd, int netfd)
         
         return 0; // 登录处理完成，不加入任务队列
     }
+
+    log_request_event(netfd,
+                      session != NULL ? session->username : "anonymous",
+                      session != NULL ? session->client_ip : "unknown",
+                      session != NULL ? session->client_port : -1,
+                      packet.type,
+                      packet.length > 0 ? packet.content : "");
 
     node_t * p_node = (node_t*)calloc(1, sizeof(node_t));
     p_node->netfd = netfd;
