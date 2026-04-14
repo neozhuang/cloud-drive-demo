@@ -138,8 +138,8 @@ int add_task(block_queue_t* queue, int epfd, int netfd)
         // maybe client closed connection or error occurred, just close connection
         printf("\nconn %d is closed.\n", netfd);
         del_epoll_readfd(epfd, netfd);
-        close(netfd);
         session_remove(netfd);  // 清理会话状态
+        close(netfd);
         return 0;
     }
 

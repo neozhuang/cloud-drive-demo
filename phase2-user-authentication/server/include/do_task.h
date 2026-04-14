@@ -18,6 +18,7 @@ int rm_file(int netfd, const char * rm_file, const char * session_path);
 int tree_dir(int netfd, const char * tree_dir, const char * session_path);
 int cat_file(int netfd, const char * cat_file, const char * session_path);
 
+int client_exit(int netfd);
 int notcmd(int netfd);
 
 #endif /* __DO_TASK_H__ */

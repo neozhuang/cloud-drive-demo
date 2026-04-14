@@ -16,8 +16,8 @@ typedef enum {
     GETS,
     TREE,
     CAT,
-    LOGIN,
-    LOGOUT,
+    LOGIN,          // 用户登录
+    CLIENT_EXIT,    // 客户端退出程序
     NOTCMD,
 } cmd_type_t;
 

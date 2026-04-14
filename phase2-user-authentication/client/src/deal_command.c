@@ -20,6 +20,8 @@ static cmd_type_t str2cmd(const char* cmd)
     else if(strcmp(cmd, "gets") == 0) return GETS;
     else if(strcmp(cmd, "tree") == 0) return TREE;
     else if(strcmp(cmd, "cat") == 0) return CAT;
+    else if(strcmp(cmd, "login") == 0) return LOGIN;
+    else if(strcmp(cmd, "exit") == 0) return CLIENT_EXIT;
     else return NOTCMD;
 }
 

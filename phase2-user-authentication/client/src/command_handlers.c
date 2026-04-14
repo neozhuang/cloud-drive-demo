@@ -114,6 +114,10 @@ int handle_response(int sockfd, const packet_t *response, char *prompt, const ch
         return recv_stream_content(sockfd);
     case CAT:
         return recv_cat_stream(sockfd, response);
+    case CLIENT_EXIT:
+        printf("bye\n");
+        close(sockfd);
+        exit(0);
     case NOTCMD:
         print_packet_message(response, "Invalid command!");
         return 0;

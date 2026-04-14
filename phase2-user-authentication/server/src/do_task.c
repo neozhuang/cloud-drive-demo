@@ -60,6 +60,11 @@ int do_task(node_t * p_node){
     case CAT:   
         cat_file(p_node->netfd, p_node->content, session_path);
         break;
+    case CLIENT_EXIT:
+        client_exit(p_node->netfd);
+        printf("Client on netfd %d is exiting...\n", p_node->netfd);
+        // 这里不直接close netfd，等到主循环检测到socket关闭时再进行清理
+        break;
     case NOTCMD:
         notcmd(p_node->netfd);
         printf("Invalid command!\n");
@@ -387,6 +392,17 @@ int cat_file(int netfd, const char * cat_file, const char * session_path)
     }
 
     close(fd);
+    return 0;
+}
+
+int client_exit(int netfd)
+{
+    // 实现客户端退出逻辑
+    packet_t packet;
+    memset(&packet, 0, sizeof(packet));
+    packet.type = CLIENT_EXIT;
+    packet.status = 0;
+    send_packet(netfd, &packet);
     return 0;
 }
 

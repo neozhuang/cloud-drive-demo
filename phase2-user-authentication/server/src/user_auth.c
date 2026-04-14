@@ -20,14 +20,15 @@ int user_auth(const char *username, const char *password, int netfd)
 {
     // 获取当前执行进程的实际用户id，保存便于后面恢复
     uid_t uid = getuid();
+    seteuid(0); // 切换到超级用户权限，获取用户信息需要超级用户权限
     struct spwd* sp = getspnam(username);
     if(!sp) {
         printf("user %s is not exist!\n", username);
         return 1; // 用户不存在
     }
-    // 进程具有超级用户特权，setuid将实际用户ID、有效用户ID、保存的设置用户ID设置为uid，取消超级用户权限
-    if(setuid(uid) != 0)
-        perror("setuid");
+    // 进程具有超级用户特权，seteuid将实际用户ID、有效用户ID，取消超级用户权限
+    if(seteuid(uid) != 0)
+        perror("seteuid");
 
     // 获取盐值，这里get_salt函数被注释掉了，因为不同加密方式盐值字段不同，需要的get_salt不一样
     // 直接使用sp->sp_pwdp作为加密函数的第二个参数，crypt会自动从中提取盐值
