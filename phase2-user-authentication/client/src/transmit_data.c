@@ -60,10 +60,13 @@ int recv_packet(int sockfd, packet_t *packet)
 int gets_file_client(int sockfd, const packet_t *first_packet, const char* filename, const char* download_path)
 {
     packet_t packet;
+    packet_t resume_packet;
     off_t filesize = 0;
     off_t received = 0;
+    off_t local_filesize = 0;
     const char *download_filename = filename;
     char file_path[PATH_MAX] = {0};
+    struct stat statbuf;
 
     if(first_packet->status != 0)
     {
@@ -71,6 +74,7 @@ int gets_file_client(int sockfd, const packet_t *first_packet, const char* filen
         return -1;
     }
 
+    // 文件存在，获取文件大小
     if(first_packet->length < (int)sizeof(filesize)) return -1;
     memcpy(&filesize, first_packet->content, sizeof(filesize));
 
@@ -79,9 +83,55 @@ int gets_file_client(int sockfd, const packet_t *first_packet, const char* filen
     else
         download_filename = filename;
 
-    snprintf(file_path, sizeof(file_path), "%s/%s", download_path, download_filename);
+    if(snprintf(file_path, sizeof(file_path), "%s/%s", download_path, download_filename) >= (int)sizeof(file_path))
+    {
+        printf("download path is too long.\n");
+        return -1;
+    }
 
-    int fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    // 添加断点续传功能，首先检查本地是否已有部分文件，如果有则告知服务器从何处开始传输
+    memset(&statbuf, 0, sizeof(statbuf));
+    if(stat(file_path, &statbuf) == 0)
+    {
+        local_filesize = statbuf.st_size;
+    }
+    else
+    {
+        local_filesize = 0;
+    }
+
+    // 本地文件比服务端还大，说明本地文件异常，重新下载
+    if(local_filesize > filesize)
+    {
+        local_filesize = 0;
+    }
+
+    memset(&resume_packet, 0, sizeof(resume_packet));
+    resume_packet.type = GETS;
+    resume_packet.status = 0;
+    resume_packet.length = sizeof(local_filesize);
+    memcpy(resume_packet.content, &local_filesize, sizeof(local_filesize));
+    if(send_packet(sockfd, &resume_packet) == -1)
+        return -1;
+
+    if(local_filesize == filesize)
+    {
+        printf("File already fully downloaded.\n");
+        return 0;
+    }
+
+    if(local_filesize > 0)
+        printf("Resuming download from byte %ld...\n", local_filesize);
+    else
+        printf("Starting download...\n");
+
+    int open_flags = O_WRONLY | O_CREAT;
+    if(local_filesize > 0)
+        open_flags |= O_APPEND;
+    else
+        open_flags |= O_TRUNC;
+
+    int fd = open(file_path, open_flags, 0666);
     if(fd == -1)
     {
         perror("open");
@@ -116,63 +166,131 @@ int gets_file_client(int sockfd, const packet_t *first_packet, const char* filen
     }
 
     close(fd);
-    if(received != filesize)
+    if(received != filesize - local_filesize)
         return -1;
 
     printf("download file %s succeed.\n", download_filename);
     return 0;
 }
 
-int puts_file_client(int sockfd, const char* filename)
+int puts_file_client(int sockfd, const packet_t *first_packet, const char* filename)
 {
+    off_t offset = 0;
+    off_t filesize = 0;
+    struct stat statbuf;
     packet_t packet;
-    memset(&packet, 0, sizeof(packet));
-    packet.type = PUTS;
-    // 可读打开上传文件
-    int fd = open(filename, O_RDONLY);
-    if(fd == -1)
+    packet_t final_packet;
+
+    if(first_packet->status != 0)
     {
-        packet.status = -1;
-        packet.length = snprintf(packet.content, sizeof(packet.content), "Can not open file %s.", filename);
-        if(packet.length < 0) packet.length = 0;
-        send_packet(sockfd, &packet);
-        printf("Can not open file %s.\n", filename);
+        printf("%.*s", first_packet->length, first_packet->content);
+        if(first_packet->length > 0 && first_packet->content[first_packet->length - 1] != '\n')
+            printf("\n");
         return -1;
     }
 
-    //文件存在，获取上传文件大小
-    struct stat statbuf;
+    if(first_packet->length != (int)sizeof(offset))
+        return -1;
+    memcpy(&offset, first_packet->content, sizeof(offset));
+
+    memset(&packet, 0, sizeof(packet));
+    packet.type = PUTS;
     memset(&statbuf, 0, sizeof(statbuf));
-    fstat(fd, &statbuf);
-    off_t filesize = statbuf.st_size;
+    if(stat(filename, &statbuf) == 0)
+    {
+        filesize = statbuf.st_size;
+        packet.status = 0;
+        packet.length = sizeof(filesize);
+        memcpy(packet.content, &filesize, packet.length);
+        if(send_packet(sockfd, &packet) == -1)
+            return -1;
+    }
+    else
+    {
+        packet.status = -1;
+        packet.length = snprintf(packet.content, sizeof(packet.content), "%s is not exist.\n", filename);
+        if(packet.length < 0) packet.length = 0;
+        if(packet.length > CONTENT_MAX) packet.length = CONTENT_MAX;
+        send_packet(sockfd, &packet);
+        return -1;
+    }
 
-    // 发送文件大小作为首包
-    packet.status = 0;
-    packet.length = sizeof(filesize);
-    memcpy(packet.content, &filesize, packet.length);
-    send_packet(sockfd, &packet);
-    printf("open file %s succeed.\n", filename);
+    if(offset < 0)
+        offset = 0;
+    if(offset > filesize)
+        offset = 0;
 
-    // 发送文件
+    if(offset == filesize)
+    {
+        printf("File already fully uploaded.\n");
+        if(recv_packet(sockfd, &final_packet) == -1)
+            return -1;
+        printf("%.*s", final_packet.length, final_packet.content);
+        if(final_packet.length > 0 && final_packet.content[final_packet.length - 1] != '\n')
+            printf("\n");
+        return final_packet.status == 0 ? 0 : -1;
+    }
+
+    int fd = open(filename, O_RDONLY);
+    if(fd == -1)
+        return -1;
+
+    if(offset > 0)
+    {
+        if(lseek(fd, offset, SEEK_SET) == -1)
+        {
+            close(fd);
+            return -1;
+        }
+        printf("Resuming upload from byte %ld...\n", offset);
+    }
+    else
+    {
+        printf("Starting upload...\n");
+    }
+
     while(1)
     {
         memset(packet.content, 0, sizeof(packet.content));
         packet.length = read(fd, packet.content, sizeof(packet.content));
-        if(packet.length > 0)
+        if(packet.length < 0)
         {
-            packet.status = 0;
-            send_packet(sockfd, &packet);
+            close(fd);
+            return -1;
         }
-        else
+        if(packet.length == 0)
             break;
+
+        packet.status = 0;
+        if(send_packet(sockfd, &packet) == -1)
+        {
+            close(fd);
+            return -1;
+        }
     }
-    // 发送结束标志
+
     packet.status = 0;
     packet.length = 0;
-    send_packet(sockfd, &packet);
+    if(send_packet(sockfd, &packet) == -1)
+    {
+        close(fd);
+        return -1;
+    }
+
     close(fd);
     printf("send complete!\n");
-    return 0;
+
+    if(recv_packet(sockfd, &final_packet) == -1)
+        return -1;
+
+    if(final_packet.type != PUTS)
+        return -1;
+
+    printf("%.*s", final_packet.length, final_packet.content);
+    if(final_packet.length > 0 && final_packet.content[final_packet.length - 1] != '\n')
+        printf("\n");
+
+    return final_packet.status == 0 ? 0 : -1;
 }
 
 int recv_stream_content(int sockfd)

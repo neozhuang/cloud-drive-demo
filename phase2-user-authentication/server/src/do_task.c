@@ -98,6 +98,8 @@ int do_task(node_t * p_node){
     case GETS:
         op_status = gets_file_server(p_node->netfd, p_node->content, session_path);
         detail = op_status == 0 ? "download success" : "download failed";
+        // 下载任务完成后，重新加入 epoll 监听
+        add_epoll_readfd(p_node->epfd, p_node->netfd);
         break;
     case TREE:  
         op_status = tree_dir(p_node->netfd, p_node->content, session_path);

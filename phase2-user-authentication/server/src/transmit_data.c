@@ -61,6 +61,9 @@ int recv_packet(int sockfd, packet_t *packet)
 
 int gets_file_server(int sockfd, const char * command_content, const char * session_path)
 {
+    // 添加断点续传功能
+    // 当前版本练习使用mmap进行文件传输优化，后续版本可以考虑使用sendfile系统调用进一步优化性能
+
     struct timeval start_time, end_time;
     gettimeofday(&start_time, NULL);
     // get short path of the file to be downloaded
@@ -119,6 +122,18 @@ int gets_file_server(int sockfd, const char * command_content, const char * sess
     if(send_packet(sockfd, &packet) == -1)
         return -1;
 
+    // 等待客户端发送断点续传信息
+    memset(&packet, 0, sizeof(packet));
+    if(recv_packet(sockfd, &packet) == -1)
+        return -1;
+
+    off_t offset = 0;
+    if(packet.length == (int)sizeof(offset))
+        memcpy(&offset, packet.content, sizeof(offset));
+
+    // 客户端已经有文件了
+    if(offset == statbuf.st_size) return 0;
+
     int fd = open(short_path, O_RDONLY);
     if(fd == -1)
     {
@@ -133,6 +148,26 @@ int gets_file_server(int sockfd, const char * command_content, const char * sess
                            0,
                            "can not open file");
         return send_text_response(sockfd, GETS, -1, "gets failed, can not open file.\n");
+    }
+
+    // 跳过已下载部分
+    if(offset > 0)
+    {
+        if(lseek(fd, offset, SEEK_SET) == -1)
+        {
+            close(fd);
+            log_transfer_event(sockfd,
+                               session != NULL ? session->username : "anonymous",
+                               session != NULL ? session->client_ip : "unknown",
+                               session != NULL ? session->client_port : -1,
+                               "download",
+                               filename,
+                               statbuf.st_size,
+                               -1,
+                               0,
+                               "lseek failed");
+            return send_text_response(sockfd, GETS, -1, "gets failed, server internal error.\n");
+        }
     }
 
     while(1)
@@ -198,30 +233,59 @@ int gets_file_server(int sockfd, const char * command_content, const char * sess
 
 int puts_file_server(int sockfd, const char * command_content, const char * session_path)
 {
+    // 添加断点续传功能
+    // 当前版本练习使用mmap进行文件传输优化，后续版本可以考虑使用sendfile系统调用进一步优化性能
+
+    // 1. 接收到的command_content是要上传的文件名
+    // 2. 服务端发送这个文件的大小，如果不存在大小设置为0
+    // 3. 客户端第一个包收的就是这个服务端的文件大小
+    // 4. 客户端发送文件大小，如果不存在，status = -1 return
+    // 5. 服务端接收客户端发来的文件大小,如果status = -1 return
+    // 6. 客户端打开文件，lseek到对应的偏移，开始发送
+    // 7. 服务端根据local_size来追加打开或者截断打开，开始接收
+
     struct timeval start_time, end_time;
     gettimeofday(&start_time, NULL);
-    packet_t packet;
-    off_t filesize = 0;
     off_t received = 0;
+    off_t local_filesize = 0;
     const char *upload_filename = command_content;
     char file_path[PATH_MAX] = {0};
     session_t *session = session_get(sockfd);
+    packet_t packet;
+    off_t filesize = 0;
+    struct stat statbuf;
 
+    if((upload_filename = strrchr(command_content, '/')) != NULL)
+        ++upload_filename;
+    else
+        upload_filename = command_content;
+
+    // 2. 服务端发送断点续传偏移值给客户端
+    if(snprintf(file_path, sizeof(file_path), "%s/%s", session_path, upload_filename) >= (int)sizeof(file_path))
+        return send_text_response(sockfd, PUTS, -1, "puts failed, target path is too long.\n");
+    memset(&statbuf, 0, sizeof(statbuf));
+    if(stat(file_path, &statbuf) == 0)
+        local_filesize = statbuf.st_size;
+    else
+        local_filesize = 0;
+
+    // send resume_packet
+    packet_t resume_packet;
+    memset(&resume_packet, 0, sizeof(resume_packet));
+    resume_packet.type = PUTS;
+    resume_packet.status = 0;
+    resume_packet.length = sizeof(local_filesize);
+    memcpy(resume_packet.content, &local_filesize, sizeof(local_filesize));
+    if(send_packet(sockfd, &resume_packet) == -1)
+        return -1;
+    
+    // 5. 服务端接收客户端发来的文件大小,如果status = -1 return
     memset(&packet, 0, sizeof(packet));
     if(recv_packet(sockfd, &packet) == -1)
-    {
-        log_transfer_event(sockfd,
-                           session != NULL ? session->username : "anonymous",
-                           session != NULL ? session->client_ip : "unknown",
-                           session != NULL ? session->client_port : -1,
-                           "upload",
-                           upload_filename,
-                           0,
-                           -1,
-                           0,
-                           "receive file header failed");
         return -1;
-    }
+
+    if(packet.type != PUTS)
+        return send_text_response(sockfd, PUTS, -1, "puts failed, invalid upload header.\n");
 
     if(packet.status != 0)
     {
@@ -235,48 +299,33 @@ int puts_file_server(int sockfd, const char * command_content, const char * sess
                            0,
                            -1,
                            0,
-                           "client send file header error");
+                           "uploaded file is not exist");
         return -1;
     }
 
-    if(packet.length < (int)sizeof(filesize))
-    {
-        log_transfer_event(sockfd,
-                           session != NULL ? session->username : "anonymous",
-                           session != NULL ? session->client_ip : "unknown",
-                           session != NULL ? session->client_port : -1,
-                           "upload",
-                           upload_filename,
-                           0,
-                           -1,
-                           0,
-                           "invalid file size header");
-        return -1;
-    }
+    if(packet.length != (int)sizeof(filesize))
+        return send_text_response(sockfd, PUTS, -1, "puts failed, invalid file size header.\n");
+
     memcpy(&filesize, packet.content, sizeof(filesize));
 
-    if((upload_filename = strrchr(command_content, '/')) != NULL)
-        ++upload_filename;
+    if(local_filesize > filesize)
+        local_filesize = 0;
+
+    if(local_filesize == filesize)
+        return send_text_response(sockfd, PUTS, 0, "Upload file successfully!\n");
+
+    // 7. 服务端根据local_size来追加打开或者截断打开，开始接收
+    int open_flags = O_WRONLY | O_CREAT;
+    if(local_filesize > 0)
+        open_flags |= O_APPEND;
     else
-        upload_filename = command_content;
+        open_flags |= O_TRUNC;
 
-    if(snprintf(file_path, sizeof(file_path), "%s/%s", session_path, upload_filename) >= (int)sizeof(file_path))
-        return send_text_response(sockfd, PUTS, -1, "puts failed, target path is too long.\n");
-
-    int fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    int fd = open(file_path, open_flags, 0666);
     if(fd == -1)
     {
-        log_transfer_event(sockfd,
-                           session != NULL ? session->username : "anonymous",
-                           session != NULL ? session->client_ip : "unknown",
-                           session != NULL ? session->client_port : -1,
-                           "upload",
-                           upload_filename,
-                           filesize,
-                           -1,
-                           0,
-                           "can not create file");
-        return send_text_response(sockfd, PUTS, -1, "puts failed, can not create file.\n");
+        perror("open");
+        return -1;
     }
 
     while(1)
@@ -298,19 +347,15 @@ int puts_file_server(int sockfd, const char * command_content, const char * sess
             return -1;
         }
 
+        if(packet.type != PUTS)
+        {
+            close(fd);
+            return send_text_response(sockfd, PUTS, -1, "puts failed, invalid upload packet.\n");
+        }
+
         if(packet.status != 0)
         {
             close(fd);
-            log_transfer_event(sockfd,
-                               session != NULL ? session->username : "anonymous",
-                               session != NULL ? session->client_ip : "unknown",
-                               session != NULL ? session->client_port : -1,
-                               "upload",
-                               upload_filename,
-                               filesize,
-                               -1,
-                               0,
-                               "client send file content error");
             return send_text_response(sockfd, PUTS, -1, "puts failed, client send file error.\n");
         }
 
@@ -336,7 +381,7 @@ int puts_file_server(int sockfd, const char * command_content, const char * sess
     }
 
     close(fd);
-    if(received != filesize)
+    if(received != filesize - local_filesize)
     {
         log_transfer_event(sockfd,
                            session != NULL ? session->username : "anonymous",

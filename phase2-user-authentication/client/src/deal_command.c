@@ -3,6 +3,7 @@
 #include "../include/utils.h"
 #include "../include/packet.h"
 #include "../include/transmit_data.h"
+#include "../include/common.h"
 #include <linux/limits.h>
 #include <string.h>
 #include <stdio.h>
@@ -29,7 +30,9 @@ static void init_prompt(char *prompt)
 {
     static int initialized = 0;
     if(initialized) return;
+    // one-shot task
     snprintf(prompt, PATH_MAX, "%s",  "~");
+    mkdir(DOWNLOAD_PATH, 0777);
     initialized = 1;
 }
 
@@ -82,8 +85,9 @@ int deal_command(int sockfd, const char* username) {
     if(send_packet(sockfd, &request) == -1) return -1;
 
     // 如果是puts命令，先上传文件内容，再等待服务器响应
-    if(request.type == PUTS && puts_file_client(sockfd, request.content) == -1)
-        return -1;
+    //if(request.type == PUTS && puts_file_client(sockfd, request.content) == -1)
+    //    return -1;
+    
     // 接收服务器响应
     if(recv_packet(sockfd, &response) == -1) return -1;
     // 处理服务器响应并打印结果

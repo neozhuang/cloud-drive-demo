@@ -101,7 +101,7 @@ int handle_response(int sockfd, const packet_t *response, char *prompt, const ch
     case RM:
         return handle_status_only_command(response, "rm false!");
     case PUTS:
-        return handle_status_only_command(response, "puts false!");
+        return puts_file_client(sockfd, response, parameter);
     case GETS:
         return gets_file_client(sockfd, response, parameter, DOWNLOAD_PATH);
     case TREE:

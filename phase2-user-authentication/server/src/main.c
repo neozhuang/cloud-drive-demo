@@ -135,6 +135,7 @@ int main(int argc, char * argv[])
                 session_set_connection_info(netfd, client_ip, client_port, time(NULL));
                 log_connection_event("CONNECT", netfd, client_ip, client_port, "anonymous", "client connected");
                 add_epoll_readfd(epfd, netfd);
+                printf("\nnew connection: netfd=%d client=%s:%d\n", netfd, client_ip, client_port);
             }
             else if(events[i].data.fd == exit_pipe[0]) {
                 log_write(LOG_LEVEL_INFO, "SERVER", "server shutting down");
@@ -159,7 +160,6 @@ int add_task(block_queue_t* queue, int epfd, int netfd)
     session_t *session = session_get_or_create(netfd);
     if(recv_packet(netfd, &packet) == -1){
         // maybe client closed connection or error occurred, just close connection
-        printf("\nconn %d is closed.\n", netfd);
         if(session != NULL) {
             long online_seconds = 0;
             if(session->connect_time != 0) {
@@ -185,6 +185,7 @@ int add_task(block_queue_t* queue, int epfd, int netfd)
         del_epoll_readfd(epfd, netfd);
         session_remove(netfd);  // 清理会话状态
         close(netfd);
+        printf("\nconn %d is closed.\n", netfd);
         return 0;
     }
 
@@ -262,9 +263,9 @@ int add_task(block_queue_t* queue, int epfd, int netfd)
         p_node->content[0] = '\0';
     }
 
-    if(packet.length > 0 && p_node->type == PUTS){
-        // 上传任务 先暂时从epoll实例中删除监听
-        del_epoll_readfd(epfd, netfd);                
+    if(packet.length > 0 && (p_node->type == PUTS || p_node->type == GETS)){
+        // 文件传输任务先暂时从 epoll 实例中删除监听，避免主线程与工作线程同时读取同一 socket
+        del_epoll_readfd(epfd, netfd);
     }
     queue_enque(queue, p_node);
 
