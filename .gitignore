@@ -57,17 +57,20 @@ dkms.conf
 # ---
 
 # Download files
-client/Downloads/
+phase1-basic-framework/client/Downloads/
+phase2-user-authentication/client/Downloads/
 
 # Upload files
-server/cloud-drive/
+phase1-basic-framework/server/cloud-drive/
+phase2-user-authentication/server/cloud-drive/
 
-# exe file
+# executable files
 phase1-basic-framework/client/client
 phase1-basic-framework/server/server
 
 phase2-user-authentication/client/client
 phase2-user-authentication/server/server
 
-# log files
+# log files (general pattern)
 *.log
+# phase2-user-authentication/server/server.log
