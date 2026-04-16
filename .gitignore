@@ -53,3 +53,21 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# ---
+
+# Download files
+client/Downloads/
+
+# Upload files
+server/cloud-drive/
+
+# exe file
+phase1-basic-framework/client/client
+phase1-basic-framework/server/server
+
+phase2-user-authentication/client/client
+phase2-user-authentication/server/server
+
+# log files
+*.log
