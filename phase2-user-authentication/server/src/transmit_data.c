@@ -4,6 +4,9 @@
 #include "../include/task_helper.h"
 #include "../include/session.h"
 #include "../include/log.h"
+#include <sys/mman.h>
+
+#define MMAP_THRESHOLD (100 * 1024 * 1024)  // 100MB
 
 static int packet_bytes(const packet_t *packet)
 {
@@ -134,28 +137,18 @@ int gets_file_server(int sockfd, const char * command_content, const char * sess
     // 客户端已经有文件了
     if(offset == statbuf.st_size) return 0;
 
-    int fd = open(short_path, O_RDONLY);
-    if(fd == -1)
+    // 计算剩余需要传输的数据量
+    off_t remaining = statbuf.st_size - offset;
+    
+    // 大文件优化：超过100MB使用mmap发送
+    if(remaining >= MMAP_THRESHOLD)
     {
-        log_transfer_event(sockfd,
-                           session != NULL ? session->username : "anonymous",
-                           session != NULL ? session->client_ip : "unknown",
-                           session != NULL ? session->client_port : -1,
-                           "download",
-                           filename,
-                           statbuf.st_size,
-                           -1,
-                           0,
-                           "can not open file");
-        return send_text_response(sockfd, GETS, -1, "gets failed, can not open file.\n");
-    }
-
-    // 跳过已下载部分
-    if(offset > 0)
-    {
-        if(lseek(fd, offset, SEEK_SET) == -1)
+        printf("Large file detected for download (%ld bytes >= %d), using mmap optimization for sending...\n", 
+               remaining, MMAP_THRESHOLD);
+        
+        int fd = open(short_path, O_RDONLY);
+        if(fd == -1)
         {
-            close(fd);
             log_transfer_event(sockfd,
                                session != NULL ? session->username : "anonymous",
                                session != NULL ? session->client_ip : "unknown",
@@ -165,36 +158,100 @@ int gets_file_server(int sockfd, const char * command_content, const char * sess
                                statbuf.st_size,
                                -1,
                                0,
-                               "lseek failed");
-            return send_text_response(sockfd, GETS, -1, "gets failed, server internal error.\n");
+                               "can not open file");
+            return send_text_response(sockfd, GETS, -1, "gets failed, can not open file.\n");
         }
-    }
-
-    while(1)
-    {
-        memset(packet.content, 0, sizeof(packet.content));
-        packet.length = read(fd, packet.content, sizeof(packet.content));
-        if(packet.length < 0)
+        
+        // 跳过已下载部分
+        if(offset > 0)
         {
+            if(lseek(fd, offset, SEEK_SET) == -1)
+            {
+                close(fd);
+                log_transfer_event(sockfd,
+                                   session != NULL ? session->username : "anonymous",
+                                   session != NULL ? session->client_ip : "unknown",
+                                   session != NULL ? session->client_port : -1,
+                                   "download",
+                                   filename,
+                                   statbuf.st_size,
+                                   -1,
+                                   0,
+                                   "lseek failed");
+                return send_text_response(sockfd, GETS, -1, "gets failed, server internal error.\n");
+            }
+        }
+        
+        // 映射文件剩余部分到内存
+        void *mapped = mmap(NULL, remaining, PROT_READ, MAP_PRIVATE, fd, offset);
+        if(mapped == MAP_FAILED)
+        {
+            perror("mmap failed, falling back to traditional method");
             close(fd);
-            log_transfer_event(sockfd,
-                               session != NULL ? session->username : "anonymous",
-                               session != NULL ? session->client_ip : "unknown",
-                               session != NULL ? session->client_port : -1,
-                               "download",
-                               filename,
-                               statbuf.st_size,
-                               -1,
-                               0,
-                               "file read error");
+            // 回退到传统方式
+            goto traditional_method;
+        }
+        
+        printf("File mapped at address %p, size %ld bytes for sending\n", mapped, remaining);
+        
+        char *read_ptr = (char *)mapped;
+        off_t bytes_sent = 0;
+        
+        while(bytes_sent < remaining)
+        {
+            int chunk_size = (remaining - bytes_sent) > CONTENT_MAX ? CONTENT_MAX : (int)(remaining - bytes_sent);
+            
+            memset(packet.content, 0, sizeof(packet.content));
+            memcpy(packet.content, read_ptr + bytes_sent, chunk_size);
+            packet.length = chunk_size;
+            packet.status = 0;
+            
+            if(send_packet(sockfd, &packet) == -1)
+            {
+                munmap(mapped, remaining);
+                close(fd);
+                log_transfer_event(sockfd,
+                                   session != NULL ? session->username : "anonymous",
+                                   session != NULL ? session->client_ip : "unknown",
+                                   session != NULL ? session->client_port : -1,
+                                   "download",
+                                   filename,
+                                   statbuf.st_size,
+                                   -1,
+                                   0,
+                                   "send packet failed");
+                return -1;
+            }
+            
+            bytes_sent += chunk_size;
+            
+            // 每发送10MB打印一次进度
+            if(bytes_sent % (10 * 1024 * 1024) < chunk_size || bytes_sent == remaining)
+            {
+                printf("Send progress: %ld/%ld bytes (%.1f%%)\n", 
+                       bytes_sent, remaining, (double)bytes_sent * 100.0 / remaining);
+            }
+        }
+        
+        // 解除映射
+        if(munmap(mapped, remaining) == -1)
+        {
+            perror("munmap");
+            close(fd);
             return -1;
         }
-        if(packet.length == 0)
-            break;
-        packet.status = 0;
-        if(send_packet(sockfd, &packet) == -1)
+        
+        close(fd);
+        
+        printf("mmap send completed, sent %ld bytes\n", bytes_sent);
+    }
+    else
+    {
+        // 传统方式发送小文件
+        traditional_method:
+        int fd = open(short_path, O_RDONLY);
+        if(fd == -1)
         {
-            close(fd);
             log_transfer_event(sockfd,
                                session != NULL ? session->username : "anonymous",
                                session != NULL ? session->client_ip : "unknown",
@@ -204,12 +261,72 @@ int gets_file_server(int sockfd, const char * command_content, const char * sess
                                statbuf.st_size,
                                -1,
                                0,
-                               "send packet failed");
-            return -1;
+                               "can not open file");
+            return send_text_response(sockfd, GETS, -1, "gets failed, can not open file.\n");
         }
-    }
 
-    close(fd);
+        // 跳过已下载部分
+        if(offset > 0)
+        {
+            if(lseek(fd, offset, SEEK_SET) == -1)
+            {
+                close(fd);
+                log_transfer_event(sockfd,
+                                   session != NULL ? session->username : "anonymous",
+                                   session != NULL ? session->client_ip : "unknown",
+                                   session != NULL ? session->client_port : -1,
+                                   "download",
+                                   filename,
+                                   statbuf.st_size,
+                                   -1,
+                                   0,
+                                   "lseek failed");
+                return send_text_response(sockfd, GETS, -1, "gets failed, server internal error.\n");
+            }
+        }
+
+        while(1)
+        {
+            memset(packet.content, 0, sizeof(packet.content));
+            packet.length = read(fd, packet.content, sizeof(packet.content));
+            if(packet.length < 0)
+            {
+                close(fd);
+                log_transfer_event(sockfd,
+                                   session != NULL ? session->username : "anonymous",
+                                   session != NULL ? session->client_ip : "unknown",
+                                   session != NULL ? session->client_port : -1,
+                                   "download",
+                                   filename,
+                                   statbuf.st_size,
+                                   -1,
+                                   0,
+                                   "file read error");
+                return -1;
+            }
+            if(packet.length == 0)
+                break;
+            packet.status = 0;
+            if(send_packet(sockfd, &packet) == -1)
+            {
+                close(fd);
+                log_transfer_event(sockfd,
+                                   session != NULL ? session->username : "anonymous",
+                                   session != NULL ? session->client_ip : "unknown",
+                                   session != NULL ? session->client_port : -1,
+                                   "download",
+                                   filename,
+                                   statbuf.st_size,
+                                   -1,
+                                   0,
+                                   "send packet failed");
+                return -1;
+            }
+        }
+
+        close(fd);
+    }
+    
     packet.length = 0;
     packet.status = 0;
     if(send_packet(sockfd, &packet) == -1)
@@ -315,25 +432,124 @@ int puts_file_server(int sockfd, const char * command_content, const char * sess
         return send_text_response(sockfd, PUTS, 0, "Upload file successfully!\n");
 
     // 7. 服务端根据local_size来追加打开或者截断打开，开始接收
-    int open_flags = O_WRONLY | O_CREAT;
-    if(local_filesize > 0)
-        open_flags |= O_APPEND;
-    else
-        open_flags |= O_TRUNC;
-
-    int fd = open(file_path, open_flags, 0666);
-    if(fd == -1)
+    // 计算需要接收的数据量
+    off_t remaining = filesize - local_filesize;
+    
+    // 大文件优化：超过100MB使用mmap接收
+    if(remaining >= MMAP_THRESHOLD)
     {
-        perror("open");
-        return -1;
-    }
-
-    while(1)
-    {
-        memset(&packet, 0, sizeof(packet));
-        if(recv_packet(sockfd, &packet) == -1)
+        printf("Large file detected (%ld bytes >= %d), using mmap optimization for receiving...\n", 
+               remaining, MMAP_THRESHOLD);
+        
+        // 打开文件，支持断点续传
+        int open_flags = O_RDWR | O_CREAT;
+        if(local_filesize > 0)
+            open_flags |= O_APPEND;
+        else
+            open_flags |= O_TRUNC;
+        
+        int fd = open(file_path, open_flags, 0666);
+        if(fd == -1)
         {
+            perror("open");
+            return -1;
+        }
+        
+        // 如果本地文件大小为0，需要预先设置文件大小
+        if(local_filesize == 0)
+        {
+            if(ftruncate(fd, filesize) == -1)
+            {
+                perror("ftruncate");
+                close(fd);
+                return send_text_response(sockfd, PUTS, -1, "puts failed, can not set file size.\n");
+            }
+        }
+        
+        // 映射文件剩余部分到内存
+        void *mapped = mmap(NULL, remaining, PROT_WRITE, MAP_SHARED, fd, local_filesize);
+        if(mapped == MAP_FAILED)
+        {
+            perror("mmap failed, falling back to traditional method");
             close(fd);
+            // 回退到传统方式
+            goto traditional_method;
+        }
+        
+        printf("File mapped at address %p, size %ld bytes for receiving\n", mapped, remaining);
+        
+        char *write_ptr = (char *)mapped;
+        off_t bytes_written = 0;
+        
+        while(1)
+        {
+            memset(&packet, 0, sizeof(packet));
+            if(recv_packet(sockfd, &packet) == -1)
+            {
+                munmap(mapped, remaining);
+                close(fd);
+                log_transfer_event(sockfd,
+                                   session != NULL ? session->username : "anonymous",
+                                   session != NULL ? session->client_ip : "unknown",
+                                   session != NULL ? session->client_port : -1,
+                                   "upload",
+                                   upload_filename,
+                                   filesize,
+                                   -1,
+                                   0,
+                                   "receive file content failed");
+                return -1;
+            }
+
+            if(packet.type != PUTS)
+            {
+                munmap(mapped, remaining);
+                close(fd);
+                return send_text_response(sockfd, PUTS, -1, "puts failed, invalid upload packet.\n");
+            }
+
+            if(packet.status != 0)
+            {
+                munmap(mapped, remaining);
+                close(fd);
+                return send_text_response(sockfd, PUTS, -1, "puts failed, client send file error.\n");
+            }
+
+            if(packet.length == 0)
+                break;
+
+            // 直接将数据复制到映射的内存区域
+            memcpy(write_ptr + bytes_written, packet.content, packet.length);
+            bytes_written += packet.length;
+            received += packet.length;
+            
+            // 每接收10MB打印一次进度
+            if(bytes_written % (10 * 1024 * 1024) < packet.length || bytes_written == remaining)
+            {
+                printf("Receive progress: %ld/%ld bytes (%.1f%%)\n", 
+                       bytes_written, remaining, (double)bytes_written * 100.0 / remaining);
+            }
+        }
+        
+        // 确保数据写入磁盘
+        if(msync(mapped, remaining, MS_SYNC) == -1)
+        {
+            perror("msync");
+            // 继续执行，不是致命错误
+        }
+        
+        // 解除映射
+        if(munmap(mapped, remaining) == -1)
+        {
+            perror("munmap");
+            close(fd);
+            return -1;
+        }
+        
+        close(fd);
+        
+        if(received != remaining)
+        {
             log_transfer_event(sockfd,
                                session != NULL ? session->username : "anonymous",
                                session != NULL ? session->client_ip : "unknown",
@@ -343,28 +559,84 @@ int puts_file_server(int sockfd, const char * command_content, const char * sess
                                filesize,
                                -1,
                                0,
-                               "receive file content failed");
+                               "file size mismatch");
+            return send_text_response(sockfd, PUTS, -1, "puts failed, file size mismatch.\n");
+        }
+        
+        printf("mmap receive completed, received %ld bytes\n", received);
+    }
+    else
+    {
+        // 传统方式接收小文件
+        traditional_method:
+        int open_flags = O_WRONLY | O_CREAT;
+        if(local_filesize > 0)
+            open_flags |= O_APPEND;
+        else
+            open_flags |= O_TRUNC;
+
+        int fd = open(file_path, open_flags, 0666);
+        if(fd == -1)
+        {
+            perror("open");
             return -1;
         }
 
-        if(packet.type != PUTS)
+        while(1)
         {
-            close(fd);
-            return send_text_response(sockfd, PUTS, -1, "puts failed, invalid upload packet.\n");
+            memset(&packet, 0, sizeof(packet));
+            if(recv_packet(sockfd, &packet) == -1)
+            {
+                close(fd);
+                log_transfer_event(sockfd,
+                                   session != NULL ? session->username : "anonymous",
+                                   session != NULL ? session->client_ip : "unknown",
+                                   session != NULL ? session->client_port : -1,
+                                   "upload",
+                                   upload_filename,
+                                   filesize,
+                                   -1,
+                                   0,
+                                   "receive file content failed");
+                return -1;
+            }
+
+            if(packet.type != PUTS)
+            {
+                close(fd);
+                return send_text_response(sockfd, PUTS, -1, "puts failed, invalid upload packet.\n");
+            }
+
+            if(packet.status != 0)
+            {
+                close(fd);
+                return send_text_response(sockfd, PUTS, -1, "puts failed, client send file error.\n");
+            }
+
+            if(packet.length == 0)
+                break;
+
+            if(write(fd, packet.content, packet.length) != packet.length)
+            {
+                close(fd);
+                log_transfer_event(sockfd,
+                                   session != NULL ? session->username : "anonymous",
+                                   session != NULL ? session->client_ip : "unknown",
+                                   session != NULL ? session->client_port : -1,
+                                   "upload",
+                                   upload_filename,
+                                   filesize,
+                                   -1,
+                                   0,
+                                   "write file failed");
+                return send_text_response(sockfd, PUTS, -1, "puts failed, can not write file.\n");
+            }
+            received += packet.length;
         }
 
-        if(packet.status != 0)
+        close(fd);
+        if(received != remaining)
         {
-            close(fd);
-            return send_text_response(sockfd, PUTS, -1, "puts failed, client send file error.\n");
-        }
-
-        if(packet.length == 0)
-            break;
-
-        if(write(fd, packet.content, packet.length) != packet.length)
-        {
-            close(fd);
             log_transfer_event(sockfd,
                                session != NULL ? session->username : "anonymous",
                                session != NULL ? session->client_ip : "unknown",
@@ -374,26 +646,9 @@ int puts_file_server(int sockfd, const char * command_content, const char * sess
                                filesize,
                                -1,
                                0,
-                               "write file failed");
-            return send_text_response(sockfd, PUTS, -1, "puts failed, can not write file.\n");
+                               "file size mismatch");
+            return send_text_response(sockfd, PUTS, -1, "puts failed, file size mismatch.\n");
         }
-        received += packet.length;
-    }
-
-    close(fd);
-    if(received != filesize - local_filesize)
-    {
-        log_transfer_event(sockfd,
-                           session != NULL ? session->username : "anonymous",
-                           session != NULL ? session->client_ip : "unknown",
-                           session != NULL ? session->client_port : -1,
-                           "upload",
-                           upload_filename,
-                           filesize,
-                           -1,
-                           0,
-                           "file size mismatch");
-        return send_text_response(sockfd, PUTS, -1, "puts failed, file size mismatch.\n");
     }
 
     gettimeofday(&end_time, NULL);

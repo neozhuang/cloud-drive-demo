@@ -2,6 +2,9 @@
 #include "../include/common.h"
 #include "../include/packet.h"
 #include <sys/socket.h>
+#include <sys/mman.h>
+
+#define MMAP_THRESHOLD (100 * 1024 * 1024)  // 100MB
 
 static int packet_bytes(const packet_t *packet)
 {
@@ -125,49 +128,164 @@ int gets_file_client(int sockfd, const packet_t *first_packet, const char* filen
     else
         printf("Starting download...\n");
 
-    int open_flags = O_WRONLY | O_CREAT;
-    if(local_filesize > 0)
-        open_flags |= O_APPEND;
+    // 计算剩余需要接收的数据量
+    off_t remaining = filesize - local_filesize;
+    
+    // 大文件优化：超过100MB使用mmap接收
+    if(remaining >= MMAP_THRESHOLD)
+    {
+        printf("Large file detected for download (%ld bytes >= %d), using mmap optimization for receiving...\n", 
+               remaining, MMAP_THRESHOLD);
+        
+        // 打开文件，支持断点续传
+        int open_flags = O_RDWR | O_CREAT;
+        if(local_filesize > 0)
+            open_flags |= O_APPEND;
+        else
+            open_flags |= O_TRUNC;
+
+        int fd = open(file_path, open_flags, 0666);
+        if(fd == -1)
+        {
+            perror("open");
+            return -1;
+        }
+        
+        // 如果本地文件大小为0，需要预先设置文件大小
+        if(local_filesize == 0)
+        {
+            if(ftruncate(fd, filesize) == -1)
+            {
+                perror("ftruncate");
+                close(fd);
+                printf("Can not set file size.\n");
+                return -1;
+            }
+        }
+        
+        // 映射文件剩余部分到内存
+        void *mapped = mmap(NULL, remaining, PROT_WRITE, MAP_SHARED, fd, local_filesize);
+        if(mapped == MAP_FAILED)
+        {
+            perror("mmap failed, falling back to traditional method");
+            close(fd);
+            // 回退到传统方式
+            goto traditional_method;
+        }
+        
+        printf("File mapped at address %p, size %ld bytes for receiving\n", mapped, remaining);
+        
+        char *write_ptr = (char *)mapped;
+        off_t bytes_written = 0;
+        
+        while(1)
+        {
+            memset(&packet, 0, sizeof(packet));
+            if(recv_packet(sockfd, &packet) == -1)
+            {
+                munmap(mapped, remaining);
+                close(fd);
+                printf("Receive packet failed.\n");
+                return -1;
+            }
+
+            if(packet.status != 0)
+            {
+                munmap(mapped, remaining);
+                close(fd);
+                printf("%.*s\n", packet.length, packet.content);
+                return -1;
+            }
+
+            if(packet.length == 0)
+                break;
+
+            // 直接将数据复制到映射的内存区域
+            memcpy(write_ptr + bytes_written, packet.content, packet.length);
+            bytes_written += packet.length;
+            received += packet.length;
+            
+            // 每接收10MB打印一次进度
+            if(bytes_written % (10 * 1024 * 1024) < packet.length || bytes_written == remaining)
+            {
+                printf("Download progress: %ld/%ld bytes (%.1f%%)\n", 
+                       bytes_written, remaining, (double)bytes_written * 100.0 / remaining);
+            }
+        }
+        
+        // 确保数据写入磁盘
+        if(msync(mapped, remaining, MS_SYNC) == -1)
+        {
+            perror("msync");
+            // 继续执行，不是致命错误
+        }
+        
+        // 解除映射
+        if(munmap(mapped, remaining) == -1)
+        {
+            perror("munmap");
+            close(fd);
+            return -1;
+        }
+        
+        close(fd);
+        
+        if(received != remaining)
+        {
+            printf("File size mismatch: received %ld, expected %ld\n", received, remaining);
+            return -1;
+        }
+        
+        printf("mmap download completed, received %ld bytes\n", received);
+    }
     else
-        open_flags |= O_TRUNC;
-
-    int fd = open(file_path, open_flags, 0666);
-    if(fd == -1)
     {
-        perror("open");
-        return -1;
+        // 传统方式接收小文件
+        traditional_method:
+        int open_flags = O_WRONLY | O_CREAT;
+        if(local_filesize > 0)
+            open_flags |= O_APPEND;
+        else
+            open_flags |= O_TRUNC;
+
+        int fd = open(file_path, open_flags, 0666);
+        if(fd == -1)
+        {
+            perror("open");
+            return -1;
+        }
+
+        while(1)
+        {
+            memset(&packet, 0, sizeof(packet));
+            if(recv_packet(sockfd, &packet) == -1)
+            {
+                close(fd);
+                return -1;
+            }
+
+            if(packet.status != 0)
+            {
+                close(fd);
+                printf("%.*s\n", packet.length, packet.content);
+                return -1;
+            }
+
+            if(packet.length == 0)
+                break;
+
+            if(write(fd, packet.content, packet.length) != packet.length)
+            {
+                close(fd);
+                return -1;
+            }
+            received += packet.length;
+        }
+
+        close(fd);
+        if(received != remaining)
+            return -1;
     }
-
-    while(1)
-    {
-        memset(&packet, 0, sizeof(packet));
-        if(recv_packet(sockfd, &packet) == -1)
-        {
-            close(fd);
-            return -1;
-        }
-
-        if(packet.status != 0)
-        {
-            close(fd);
-            printf("%.*s\n", packet.length, packet.content);
-            return -1;
-        }
-
-        if(packet.length == 0)
-            break;
-
-        if(write(fd, packet.content, packet.length) != packet.length)
-        {
-            close(fd);
-            return -1;
-        }
-        received += packet.length;
-    }
-
-    close(fd);
-    if(received != filesize - local_filesize)
-        return -1;
 
     printf("download file %s succeed.\n", download_filename);
     return 0;
@@ -175,6 +293,9 @@ int gets_file_client(int sockfd, const packet_t *first_packet, const char* filen
 
 int puts_file_client(int sockfd, const packet_t *first_packet, const char* filename)
 {
+
+    //大文件传输优化
+    //mmap 将大文件映射入内存，进行网络传递。当发现文件大于 100M，就使用 mmap 方式映射该文件，然后再传输。
     off_t offset = 0;
     off_t filesize = 0;
     struct stat statbuf;
@@ -208,7 +329,8 @@ int puts_file_client(int sockfd, const packet_t *first_packet, const char* filen
     else
     {
         packet.status = -1;
-        packet.length = snprintf(packet.content, sizeof(packet.content), "%s is not exist.\n", filename);
+        packet.length = snprintf(packet.content, sizeof(packet.content), "file %s is not exist.\n", filename);
+        printf("file %s is not exist.\n", filename);
         if(packet.length < 0) packet.length = 0;
         if(packet.length > CONTENT_MAX) packet.length = CONTENT_MAX;
         send_packet(sockfd, &packet);
@@ -249,23 +371,88 @@ int puts_file_client(int sockfd, const packet_t *first_packet, const char* filen
         printf("Starting upload...\n");
     }
 
-    while(1)
+    // 大文件传输优化：超过100MB使用mmap
+    if(filesize >= MMAP_THRESHOLD)
     {
-        memset(packet.content, 0, sizeof(packet.content));
-        packet.length = read(fd, packet.content, sizeof(packet.content));
-        if(packet.length < 0)
+        printf("Large file detected (%ld bytes >= %d), using mmap optimization...\n", filesize, MMAP_THRESHOLD);
+        
+        off_t remaining = filesize - offset;
+        off_t current_pos = offset;
+        
+        // 映射整个文件（从偏移开始）
+        void *mapped = mmap(NULL, remaining, PROT_READ, MAP_PRIVATE, fd, offset);
+        if(mapped == MAP_FAILED)
         {
+            perror("mmap failed");
             close(fd);
             return -1;
         }
-        if(packet.length == 0)
-            break;
-
-        packet.status = 0;
-        if(send_packet(sockfd, &packet) == -1)
+        
+        printf("File mapped at address %p, size %ld bytes\n", mapped, remaining);
+        
+        char *data_ptr = (char *)mapped;
+        off_t mapped_offset = 0;
+        
+        while(mapped_offset < remaining)
         {
+            int chunk_size = (remaining - mapped_offset) > CONTENT_MAX ? CONTENT_MAX : (int)(remaining - mapped_offset);
+            
+            memset(packet.content, 0, sizeof(packet.content));
+            memcpy(packet.content, data_ptr + mapped_offset, chunk_size);
+            packet.length = chunk_size;
+            packet.status = 0;
+            
+            if(send_packet(sockfd, &packet) == -1)
+            {
+                munmap(mapped, remaining);
+                close(fd);
+                return -1;
+            }
+            
+            mapped_offset += chunk_size;
+            current_pos += chunk_size;
+            
+            // 每传输10MB打印一次进度
+            if(current_pos % (10 * 1024 * 1024) < chunk_size || current_pos == filesize)
+            {
+                printf("Upload progress: %ld/%ld bytes (%.1f%%)\n", 
+                       current_pos, filesize, (double)current_pos * 100.0 / filesize);
+            }
+        }
+        
+        // 清理mmap
+        if(munmap(mapped, remaining) == -1)
+        {
+            perror("munmap failed");
             close(fd);
             return -1;
+        }
+        
+        printf("mmap transfer completed.\n");
+    }
+    else
+    {
+        // 小文件使用传统read方式
+        printf("Small file (%ld bytes < %d), using standard read...\n", filesize, MMAP_THRESHOLD);
+        
+        while(1)
+        {
+            memset(packet.content, 0, sizeof(packet.content));
+            packet.length = read(fd, packet.content, sizeof(packet.content));
+            if(packet.length < 0)
+            {
+                close(fd);
+                return -1;
+            }
+            if(packet.length == 0)
+                break;
+
+            packet.status = 0;
+            if(send_packet(sockfd, &packet) == -1)
+            {
+                close(fd);
+                return -1;
+            }
         }
     }
 
