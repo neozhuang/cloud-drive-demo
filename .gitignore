@@ -82,3 +82,6 @@ phase2-user-authentication/server/server
 
 # AI 
 *.codex
+
+# bin 
+bin/
