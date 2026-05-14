@@ -73,3 +73,12 @@ phase2-user-authentication/server/server
 
 # log files (general pattern)
 *.log
+
+# Editor backup/temp files
+*~
+*.un~
+*.swp
+*.swo
+
+# AI 
+*.codex
