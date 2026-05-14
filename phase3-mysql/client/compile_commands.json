@@ -1,0 +1,200 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/app/main.o",
+      "src/app/main.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/app/main.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/app/main.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/common/utils.o",
+      "src/common/utils.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/common/utils.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/common/utils.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/config/config.o",
+      "src/config/config.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/config/config.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/config/config.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/domain/session.o",
+      "src/domain/session.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/domain/session.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/domain/session.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/protocol/protocol.o",
+      "src/protocol/protocol.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/protocol/protocol.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/protocol/protocol.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/service/auth_service.o",
+      "src/service/auth_service.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/service/auth_service.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/service/auth_service.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/transport/connection.o",
+      "src/transport/connection.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/transport/connection.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/transport/connection.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/transport/packet_io.o",
+      "src/transport/packet_io.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/transport/packet_io.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/transport/packet_io.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/ui/menu.o",
+      "src/ui/menu.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/ui/menu.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/ui/menu.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/src/ui/term_ui.o",
+      "src/ui/term_ui.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/src/ui/term_ui.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/src/ui/term_ui.o"
+  },
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-Iinclude",
+      "-Ithird_party/inih",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-std=c11",
+      "-c",
+      "-o",
+      "build/third_party/inih/ini.o",
+      "third_party/inih/ini.c"
+    ],
+    "directory": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client",
+    "file": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/third_party/inih/ini.c",
+    "output": "/home/zhuang/Projects/cloud-drive-demo/phase3-mysql/client/build/third_party/inih/ini.o"
+  }
+]
