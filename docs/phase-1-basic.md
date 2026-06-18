@@ -2,7 +2,7 @@
 
 Phase 1 implements a basic client/server cloud drive system. The client connects to the server over TCP, logs in with a username, runs file management commands inside the user's own cloud drive directory, and supports basic file upload and download.
 
-Demo video: [Phase 1 Basic Usage Demo](../assets/videos/phase-1-basic-usage-demo.mp4)
+[Phase 1 Basic Usage Demo](https://github.com/user-attachments/assets/85da4ad5-ecd6-43ad-b71a-10fdc79ffe54)
 
 ## Technology Stack
 
