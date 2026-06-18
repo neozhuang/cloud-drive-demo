@@ -33,7 +33,7 @@ By default, the server listens on `0.0.0.0:8888`, and the client connects to `12
 
 ## Demo Video
 
-[Phase 1 Basic Usage Demo](assets/videos/phase-1-basic-usage-demo.mp4)
+[Phase 1 Basic Usage Demo](https://github.com/user-attachments/assets/85da4ad5-ecd6-43ad-b71a-10fdc79ffe54)
 
 ## Detailed Documentation
 
