@@ -15,6 +15,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <sys/epoll.h>
+#include <sys/sendfile.h>
 
 #include "common/log.h"
 #include "common/protocol.h"
@@ -565,10 +566,11 @@ static void handle_rm(packet_task_t* task)
 
 /**
  * handle_puts
+ * add feat: resumable transfer and large file transfer optimization
  *
  * The process of server side puts:
- * 1. recv puts_req
- * 2. send puts_resp
+ * 1. recv puts_req(file name and file size)
+ * 2. send puts_resp(resume offset or error)
  * 3. recv puts_file_data
  * 4. recv puts_file_end
  * 5. send ack/error
@@ -584,11 +586,13 @@ static void handle_puts(transfer_task_t* task)
     file_info_payload_t info;
     uint64_t recved = 0;
     packet_t packet;
-    file_chunk_payload_t chunk;
     unsigned int chunk_size;
     int file_fd;
     int nwrited;
+    struct stat st;
+    resume_payload_t resume;
 
+    // 1. recv puts_req(file name and file size)
     // get the uploaded file name and file size
     memset(&info, 0, sizeof(info));
     memcpy(&info, task->packet.payload, task->packet.header.data_len);
@@ -609,20 +613,38 @@ static void handle_puts(transfer_task_t* task)
     }
 
     // open the file
-    if ((file_fd = open(fs_path, O_CREAT | O_RDWR | O_TRUNC, 0666))  == -1) {
+    if ((file_fd = open(fs_path, O_CREAT | O_RDWR, 0666))  == -1) {
         LOG_ERROR("failed to open the uploaded file %s", file_name);
         format_response(response, sizeof(response), "server failed to open file\n",
                         "server failed to open file %s\n", file_name);
         send_packet(task->client_fd, CMD_ERROR, STATUS_IO_ERROR, response, strlen(response));
         return;
     }
+    if (fstat(file_fd, &st) != 0) {
+        perror("fstat");
+        close(file_fd);
+        return;
+    }
+    uint64_t offset  = st.st_size;
+    resume.offset = host_to_net_u64(offset);
 
-    // send puts_resp
-    send_packet(task->client_fd, CMD_PUTS_RESP, STATUS_OK, NULL, 0);
+    // 2. send puts_resp(resume offset or error)
+    send_packet(task->client_fd, CMD_PUTS_RESP, STATUS_OK, &resume, sizeof(resume));
 
-    // recv file data
+    // lseek
+    if (lseek(file_fd, offset, SEEK_SET) == -1) {
+        perror("lseek");
+        close(file_fd);
+        return;
+    }
+
+    if (offset > 0) {
+        LOG_INFO("resume puts from position %lu", offset);
+    }
+
+    // 3. recv puts_file_data
     int got_file_end = 0;   // file end flag
-    while (recved < file_size) {
+    while (recved < file_size - offset) {
         memset(&packet, 0, sizeof(packet));
 
         if (recv_packet(task->client_fd, &packet) != 0) {
@@ -631,6 +653,7 @@ static void handle_puts(transfer_task_t* task)
             return;
         }
 
+        //  4. recv puts_file_end
         if (packet.header.cmd_type == CMD_FILE_END) {
             got_file_end = 1;
             free_packet(&packet);
@@ -644,17 +667,15 @@ static void handle_puts(transfer_task_t* task)
             return;
         }
 
-        memcpy(&chunk, packet.payload, sizeof(chunk));
-
-        chunk_size = ntohl(chunk.data_len);
-        if (chunk_size == 0 || chunk_size > FILE_BLOCK_SIZE) {
+        chunk_size = packet.header.data_len;
+        if (chunk_size == 0 || chunk_size > FILE_CHUNK_SIZE) {
             free_packet(&packet);
             send_packet(task->client_fd, CMD_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
             close(file_fd);
             return;
         }
 
-        nwrited = write(file_fd, chunk.data, chunk_size);
+        nwrited = write(file_fd, packet.payload, chunk_size);
         if (nwrited != (ssize_t)chunk_size) {
             free_packet(&packet);
             send_packet(task->client_fd, CMD_ERROR, STATUS_IO_ERROR, NULL, 0);
@@ -666,8 +687,8 @@ static void handle_puts(transfer_task_t* task)
         free_packet(&packet);
     }
 
-    // send ack
-    if (recved == file_size) {
+    // 5. send ack/error
+    if (recved == file_size - offset) {
         if (!got_file_end) {
             if (recv_packet(task->client_fd, &packet) != 0) {
                 send_packet(task->client_fd, CMD_ERROR, STATUS_IO_ERROR, NULL, 0);
@@ -693,14 +714,40 @@ static void handle_puts(transfer_task_t* task)
 }
 
 
+static int sendfile_exact(int out_fd, int in_fd, off_t *offset, uint64_t count)
+{
+    uint64_t remaining = count;
+
+    while (remaining > 0) {
+        ssize_t n = sendfile(out_fd, in_fd, offset, (size_t)remaining);
+
+        if (n > 0) {
+            remaining -= (uint64_t)n;
+            continue;
+        }
+
+        if (n == 0) {
+            return -1;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        return -1;
+    }
+
+    return 0;
+}
+
 /**
  * handle_gets
  *
  * the process of server gets:
  *
- * 1. recv GETS_REQ
- * 2. open file
- * 3. send GETS_RESP(file info)
+ * 1. recv GETS_REQ(file name)
+ * 2. send GETS_RESP(file info)
+ * 3. recv resume_pos
  * 4. loop send CMD_FILE_DATA
  * 5. send CMD_FILE_END
  * 6. recv ACK or ERROR
@@ -716,11 +763,12 @@ static void handle_gets(transfer_task_t* task)
     uint64_t file_size;
     file_info_payload_t info;
     packet_t packet;
-    file_chunk_payload_t chunk;
+    resume_payload_t resume;
+    uint64_t start_offset;
     int file_fd;
     struct stat st;
 
-    // get the downloaded file name and file size
+    // 1. recv GETS_REQ(file name)
     memcpy(file_name, task->packet.payload, task->packet.header.data_len);
     file_name[task->packet.header.data_len] = '\0';
 
@@ -738,10 +786,11 @@ static void handle_gets(transfer_task_t* task)
 
     // open the file
     if ((file_fd = open(fs_path, O_RDONLY))  == -1) {
-        LOG_ERROR("failed to open the downloaded file %s", file_name);
-        format_response(response, sizeof(response), "server failed to open file\n",
-                        "server failed to open file %s\n", file_name);
-        send_packet(task->client_fd, CMD_ERROR, STATUS_IO_ERROR, response, strlen(response));
+        if (errno == ENOENT) {
+            send_packet(task->client_fd, CMD_ERROR, STATUS_NOT_FOUND, NULL, 0);
+        } else {
+            send_packet(task->client_fd, CMD_ERROR, STATUS_IO_ERROR, NULL, 0);
+        }
         return;
     }
 
@@ -763,37 +812,44 @@ static void handle_gets(transfer_task_t* task)
     info.file_name[strlen(base_name)] = '\0';
     info.file_size = host_to_net_u64(file_size);
 
-    // send GETS_REQ(file_name, file_size)
+    // 2. send GETS_REQ(file_name, file_size)
     if (send_packet(task->client_fd, CMD_GETS_RESP, STATUS_OK, &info, sizeof(info)) != 0) {
         close(file_fd);
         return;
     }
+    // 3. recv resume_pos
+    if (recv_packet(task->client_fd, &packet) != 0) {
+        close(file_fd);
+        return;
+    }
 
-    // loop: send FILE_DATA
-    uint64_t sended = 0;
-    while (sended < file_size) {
-        memset(&chunk, 0, sizeof(chunk));
-        ssize_t nread = read(file_fd, chunk.data, sizeof(chunk.data));
-        printf("file_fd = %d\n", file_fd);
-        if (nread < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            close(file_fd);
-            perror("read");
-            return;
-        }    
-        // read eof
-        if (nread == 0) {
-            break;
-        }
-        chunk.data_len = htonl(nread);
-        if (send_packet(task->client_fd, CMD_FILE_DATA, STATUS_OK, &chunk, sizeof(chunk)) != 0) {
-            close(file_fd);
-            fprintf(stderr, "failed to send file chunk\n");
+    if (packet.header.cmd_type != CMD_RESUME_POS) {
+        close(file_fd);
+        return;
+    }
+
+    memcpy(&resume, packet.payload, packet.header.data_len);
+    start_offset = net_to_host_u64(resume.offset);
+    off_t offset = start_offset;
+    uint64_t remaining = file_size - start_offset;
+
+    if (start_offset > 0) {
+        LOG_INFO("resume gets from position %lu", start_offset);
+    }
+
+   // 4. loop: send FILE_DATA
+    while (remaining > 0) {
+        uint32_t chunk_size =
+            remaining > FILE_CHUNK_SIZE ? FILE_CHUNK_SIZE : (uint32_t)remaining;
+
+        if (send_packet_header(task->client_fd, CMD_FILE_DATA, STATUS_OK, chunk_size) != 0) {
             return;
         }
-        sended += nread;
+
+        if (sendfile_exact(task->client_fd, file_fd, &offset, chunk_size) != 0) {
+            return;
+        }
+        remaining -= chunk_size;
     }
     close(file_fd);
 

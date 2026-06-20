@@ -1,66 +1,112 @@
-# Cloud Drive Demo
+# Cloud Drive Demo Overview
 
-## Phase-01
+Cloud Drive Demo is a client-server file management system that provides a command-line interface for remote file operations. The project is designed to demonstrate the core capabilities of a cloud drive: connecting to a remote storage service, browsing directories, managing files, uploading and downloading data, recording server activity, and supporting reliable large-file transfer.
 
-### Feature Requirements
+## What This Project Can Do
 
-#### Basic Framework and Commands
+The client connects to the server and lets users operate on remote files through simple shell-like commands. The server receives each request, executes the corresponding file operation, and returns the result to the client.
 
-Client:
+Planned capabilities include:
 
-```plaintext
-build connection with the server:
-client reads standard input:
-// read command line input
-// parse the content readed, get the command type and command args
-// identify them whether correct, filter invalid content 
-// send command type and args to the server
+- Remote directory navigation with commands such as `pwd`, `cd`, and `ls`.
+- Remote directory and file management with commands such as `mkdir`, `rmdir`, and `rm`.
+- File upload from client to server with `puts`.
+- File download from server to client with `gets`.
+- Multi-client handling through server-side worker threads.
+- Server-side operation logging for connections, requests, and file changes.
+- Runtime configuration for network settings, logging behavior, and transfer thresholds.
+- Resumable upload and download when a transfer is interrupted.
+- Optimized large-file transfer using platform-level mechanisms such as `mmap` and `sendfile`.
 
-client can input the available commands as follows:
-// pwd
-// cd 
-// ls
-// mkdir
-// rmdir
-// rm
-// puts 
-// gets 
-// ...
-```
+## Phase 1: Basic Cloud Drive Framework
 
-Server:
+The first phase focuses on building the core client-server workflow and implementing basic remote file commands.
 
-```plaintext
-launch the server, accept the client's connection request:
-// accept the client fd, deliver it to the subthread
-subthreads wait client requests:
-// client send commands, server receive commands
-// response by according commands
-```
+### Client Features
 
-#### Server Logging
+The client is responsible for user interaction and request delivery. It will:
 
-```plaintext
-// client connection time
-// client requests information
-// client operatoration records(e.x. rm file, upload file, when, ...)
-```
+- Establish a connection with the server.
+- Read commands from standard input.
+- Parse each command into a command type and arguments.
+- Validate command syntax before sending requests.
+- Reject invalid input locally when possible.
+- Send valid requests to the server.
+- Display server responses to the user.
 
-#### Config Files
+Supported commands in this phase include:
 
-There must be some configuration files to configure the project's basic information. This configuration file records some configuration information (we can choose not to commit: i.e., Git ignores this configuration file), and then allows our code to dynamically load information such as IP address, port, database password, and log level into the code for easy use.
+- `pwd`: show the current remote directory.
+- `cd`: change the current remote directory.
+- `ls`: list files in the current remote directory.
+- `mkdir`: create a remote directory.
+- `rmdir`: remove a remote directory.
+- `rm`: remove a remote file.
+- `puts`: upload a local file to the server.
+- `gets`: download a remote file from the server.
 
-#### Configurable Log
+### Server Features
 
-We know that logs have multiple levels. In general, during daily code development, to better track code execution and facilitate code writing and bug debugging, we set the log level to a relatively low level (e.g., INFO, DEBUG) to print as much information as possible for tracing code execution.
+The server is responsible for connection management, request handling, and file-system operations. It will:
 
-However, printing so much log information is impractical in a production environment. Firstly, some INFO or DEBUG messages are unnecessary in a production environment (the user-facing environment) (this information is used for detailed code execution tracking). Secondly, lower log levels result in more printed information, causing our program to spend a lot of time printing logs, leading to wasted server resources.
+- Start a listening service on a configured IP address and port.
+- Accept client connection requests.
+- Assign accepted client connections to worker threads.
+- Receive parsed commands from clients.
+- Execute the corresponding file operation.
+- Return success, failure, or data responses to the client.
 
-Therefore, ideally, we want the same code to dynamically select the log level based on different situations (e.g., development, testing, production).
+### Server Logging
 
-Combining the configuration options in the configuration file above, when the program runs, we first read the currently set log level from the configuration file (for example, developers might set the LOG option to LOG=INFO in the configuration file, while production environments for users would set LOG to LOG=ERROR).
+The server will record important runtime activity, including:
 
-We can let the macro function selectively print logs based on the log level read from the configuration file (i.e., if the log level passed to the log macro function is lower than the log level read from the configuration file, the macro function returns directly without printing).
+- Client connection and disconnection time.
+- Client request details.
+- File operation records, such as upload, download, remove, and directory changes.
+- Error information for failed requests or abnormal connections.
 
-This also requires that when calling the macro function in the code, we should pass different log levels to the macro function for different printing situations. 
+These logs help with debugging during development and provide operational visibility when the server is running.
 
+### Configuration Files
+
+The project will use configuration files to avoid hard-coding environment-specific values. Configuration can include:
+
+- Server IP address.
+- Server port.
+- Database credentials, if database support is added.
+- Log level.
+- Large-file transfer threshold.
+
+Configuration files make it possible to run the same code in different environments, such as local development, testing, and production. Sensitive configuration files can be excluded from version control when needed.
+
+### Configurable Logging
+
+The logging system should support multiple log levels, such as `DEBUG`, `INFO`, `WARN`, and `ERROR`.
+
+During development, lower log levels such as `DEBUG` or `INFO` are useful because they provide detailed execution traces. In production, higher log levels such as `WARN` or `ERROR` are preferred because they reduce unnecessary output and avoid wasting server resources.
+
+At startup, the program reads the configured log level and uses it to decide which messages should be printed. For example, if the configured level is `ERROR`, lower-priority messages such as `DEBUG` and `INFO` should be ignored.
+
+## Phase 2: Reliable And Optimized Transfers
+
+The second phase focuses on improving file-transfer reliability and performance, especially for large files or unstable network connections.
+
+### Resumable Transfer
+
+Upload and download operations should support resume behavior after interruption.
+
+For downloads, if a client is downloading a 215 MB file and the connection stops after 16 MB, the next `gets` request should continue from the 16 MB position instead of starting again from the beginning.
+
+For uploads, if a client is uploading a 215 MB file and the connection stops after 16 MB, the next `puts` request should continue from the uploaded 16 MB position instead of sending the whole file again.
+
+This feature reduces wasted bandwidth and improves the user experience when transferring large files.
+
+### Large-File Transfer Optimization
+
+Large files should use more efficient transfer strategies than regular buffered reads and writes.
+
+Planned optimizations include:
+
+- On the client side, use `mmap` for files larger than a configured threshold.
+- On the server side, use `sendfile` when sending large files to the client.
+- Make the threshold configurable so different environments can tune performance behavior.

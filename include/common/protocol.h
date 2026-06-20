@@ -49,10 +49,17 @@
 #define MAX_TEXT_PAYLOAD 4096U
 
 /*
- * FILE_BLOCK_SIZE:
+ * FILE_CHUNK_SIZE:
  * the number of bytes that each FILE_DATA packet
  */
-#define FILE_BLOCK_SIZE 4096U
+#define FILE_CHUNK_SIZE 4096U
+
+/**
+ * FILE_OPTIMIZATION_THRESHOLD
+ *
+ * the large file transfer optimization threshold
+ */
+#define FILE_OPTIMIZATION_THRESHOLD 1024 * 1024 * 100   // 1M * 100 = 100M
 
 typedef enum {
     CMD_INVALID = 0,        // invalid command
@@ -160,7 +167,7 @@ typedef struct {
  */
 typedef struct {
     uint32_t data_len;
-    unsigned char data[FILE_BLOCK_SIZE];
+    unsigned char data[FILE_CHUNK_SIZE];
 } file_chunk_payload_t;
 
 /* Interface */
@@ -203,6 +210,9 @@ int send_n(int fd, const void *buf, size_t len);
 int recv_n(int fd, void *buf, size_t len);
 
 int send_packet(int fd, cmd_type_t type, status_code_t status, const void *payload, uint32_t payload_len);
+
+// for sendfile use
+int send_packet_header(int fd, cmd_type_t type, status_code_t status, uint32_t payload_len);
 
 int recv_packet(int fd, packet_t *packet);
 

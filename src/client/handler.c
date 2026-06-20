@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <arpa/inet.h>
+#include <sys/mman.h>
 
 #include "common/protocol.h"
 #include "client/state.h"
@@ -151,33 +152,36 @@ static int handle_simple_command(client_state_t* client_state, const command_req
 
 /*
  * handle_puts:
+ * add feat: resumable transfer and large file transfer optimization
  *
  * the process of puts:
  *   1. open file + fstat
  *   2. send PUTS_REQ(file_name, file_size)
- *   3. recv PUTS_RESP(phase-02 will return resume_offset)
- *   4. loop: send FILE_DATA
- *   5. send FILE_END
- *   6. recv ACK / ERROR
+ *   3. recv PUTS_RESP(resume_offset or error)
+ *   4. lseek the position
+ *   5. small file: read, large file: mmap
+ *   6. loop: send FILE_DATA
+ *   7. send FILE_END
+ *   8. recv ACK / ERROR
  */
 static int handle_puts(client_state_t* client_state, const command_request_t* req)
 {
     int file_fd = -1;
     struct stat st;
     uint64_t file_size;
+    uint64_t file_offset;
     char base_name[PATH_MAX];
     file_info_payload_t info;
-    file_chunk_payload_t chunk;
     packet_t packet;
 
-    memset(&st, 0, sizeof(st));
-
+    // 1. open file + fstat
     file_fd = open(req->arg, O_RDONLY);
     if (file_fd == -1) {
         perror("open");
         return -1;
     }
 
+    memset(&st, 0, sizeof(st));
     if (fstat(file_fd, &st) != 0) {
         perror("fstat");
         close(file_fd);
@@ -195,8 +199,7 @@ static int handle_puts(client_state_t* client_state, const command_request_t* re
 
     // fill the payload
     memset(&info, 0, sizeof(info));
-    strncpy(info.file_name, base_name, strlen(base_name));
-    info.file_name[strlen(base_name)] = '\0';
+    snprintf(info.file_name, sizeof(info.file_name), "%s", base_name);
     info.file_size = host_to_net_u64(file_size);
 
     // 2. send PUTS_REQ(file_name, file_size)
@@ -206,7 +209,7 @@ static int handle_puts(client_state_t* client_state, const command_request_t* re
         return -1;
     }
 
-    // 3. recv PUTS_RESP
+    // 3. recv PUTS_RESP(resume_offset or error)
     memset(&packet, 0, sizeof(packet));
     if(recv_packet(client_state->sock_fd, &packet) != 0) {
         free_packet(&packet);
@@ -215,48 +218,105 @@ static int handle_puts(client_state_t* client_state, const command_request_t* re
         return -1;
     }
 
-    if (packet.header.cmd_type == CMD_ERROR) {
+    if (packet.header.cmd_type != CMD_PUTS_RESP) {
         print_text_from_packet(&packet);
         free_packet(&packet);
         close(file_fd);
         return -1;
     }
+
+    resume_payload_t resume;
+    memcpy(&resume, packet.payload, sizeof(resume));
+    file_offset = net_to_host_u64(resume.offset);
     free_packet(&packet);
 
-    // 4. loop: send FILE_DATA
-    uint64_t sended = 0;
-    while (sended < file_size) {
-        memset(&chunk, 0, sizeof(chunk));
-        ssize_t nread = read(file_fd, chunk.data, sizeof(chunk.data));
-        if (nread < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            close(file_fd);
-            perror("read");
-            return -1;
-        }    
-        // read eof
-        if (nread == 0) {
-            break;
-        }
-        chunk.data_len = htonl(nread);
-        if (send_packet(client_state->sock_fd, CMD_FILE_DATA, STATUS_OK, &chunk, sizeof(chunk)) != 0) {
-            close(file_fd);
-            fprintf(stderr, "failed to send file chunk\n");
-            return -1;
-        }
-        sended += nread;
+    // 4. lseek the position
+    if (lseek(file_fd, file_offset, SEEK_SET) == -1) {
+        close(file_fd);
+        send_packet(client_state->sock_fd, CMD_ERROR, STATUS_IO_ERROR, NULL, 0); 
+        perror("lseek");
+        return -1;
     }
+
+    if (file_offset > 0) {
+        printf("resume puts from position %lu\n", file_offset);
+    }
+
+    // 5. small file: read, large file: mmap
+    if (file_size - file_offset > FILE_OPTIMIZATION_THRESHOLD) {
+        // get page size
+        long page_size = sysconf(_SC_PAGE_SIZE);
+        if (page_size == -1) {
+            close(file_fd);
+            perror("sysconf");
+            return -1;
+        }
+
+        uint64_t map_offset = file_offset / page_size * page_size;
+        uint64_t offset_delta = file_offset - map_offset;
+        uint64_t map_len = file_size - map_offset;
+
+        char* map = mmap(NULL, map_len, PROT_READ, MAP_SHARED, file_fd, map_offset);
+        if (map == MAP_FAILED) {
+            close(file_fd);
+            perror("mmap");
+            return -1;
+        }
+
+        char* p = map + offset_delta;   // the file position that start to send
+        uint64_t remaining = file_size - file_offset; 
+
+        // 6. loop: send FILE_DATA
+        while (remaining > 0) {
+            uint32_t nsend = remaining > FILE_CHUNK_SIZE ? FILE_CHUNK_SIZE : remaining;
+            if (send_packet(client_state->sock_fd, CMD_FILE_DATA, STATUS_OK, p, nsend) != 0) {
+                munmap(map, map_len);
+                close(file_fd);
+                fprintf(stderr, "failed to send file chunk\n");
+                return -1;
+            }
+            p += nsend;
+            remaining -= nsend;
+        }
+        munmap(map, map_len);
+
+    }else {
+        // small file just use read and send
+        uint64_t remaining = file_size - file_offset; 
+        char buffer[FILE_CHUNK_SIZE];
+        // 6. loop: send FILE_DATA
+        while (remaining > 0) {
+            ssize_t nread = read(file_fd, buffer, sizeof(buffer)); 
+            if (nread < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                close(file_fd);
+                perror("read");
+                return -1;
+            }    
+            // read eof
+            if (nread == 0) {
+                break;
+            }
+            if (send_packet(client_state->sock_fd, CMD_FILE_DATA, STATUS_OK, buffer, nread) != 0) {
+                close(file_fd);
+                fprintf(stderr, "failed to send file chunk\n");
+                return -1;
+            }
+            remaining -= nread;
+        }
+    }
+
     close(file_fd);
 
-    // 5. send FILE_END
+    // 7. send FILE_END
     if (send_packet(client_state->sock_fd, CMD_FILE_END, STATUS_OK, NULL, 0U) != 0) {
         fprintf(stderr, "failed to send the FILE_END flag\n");
         return -1;
     }
 
-    // 6. recv ack/error
+    // 8. recv ACK / ERROR
     if (recv_text_response(client_state) != 0) {
         return -1;
     }
@@ -270,10 +330,10 @@ static int handle_puts(client_state_t* client_state, const command_request_t* re
  * the process of gets:
  * 1. send GETS_REQ(file_name)
  * 2. recv GETS_RESP(file info payload or error)
- * 3. open/create local file
- * 4. loop recv CMD_FILE_DATA
- * 5. recv CMD_FILE_END
- * 6. check recved == file_size
+ * 3. stat, send cmd_resume_pos
+ * 4. open file, lseek
+ * 5. loop recv CMD_FILE_DATA
+ * 6. recv CMD_FILE_END
  * 7. send ACK or ERROR
  */
 static int handle_gets(client_state_t* client_state, const command_request_t* req)
@@ -285,9 +345,11 @@ static int handle_gets(client_state_t* client_state, const command_request_t* re
     uint64_t recved = 0;
     uint64_t file_size = 0;
     file_info_payload_t info;
-    file_chunk_payload_t chunk;
     unsigned int chunk_size;
+    resume_payload_t resume;
     int nwrited;
+    struct stat st;
+    uint64_t offset = 0;
 
     // 1. send GETS_REQ(file_name)
     if (send_packet(client_state->sock_fd, req->type, STATUS_OK, req->arg, strlen(req->arg)) != 0) {
@@ -310,7 +372,7 @@ static int handle_gets(client_state_t* client_state, const command_request_t* re
         free_packet(&packet);
         return -1;
     }
-    
+
     // get the uploaded file name and file size
     memset(&info, 0, sizeof(info));
     memcpy(&info, packet.payload, packet.header.data_len);
@@ -320,24 +382,40 @@ static int handle_gets(client_state_t* client_state, const command_request_t* re
 
     free_packet(&packet);
 
-    // 3. open/create local file
+    // 3. stat, send cmd_resume_pos
     // concat the path of downloads and file name
     strcat(downloaded_filename, DEFAULT_DOWNLOAD_DIR);
     strcat(downloaded_filename, "/");
     strcat(downloaded_filename, file_name);
-    // mkdir downloads/ if not exist
-    if (mkdir_p(DEFAULT_DOWNLOAD_DIR, 0755) != 0) {
-        return -1;
+    mkdir_p(DEFAULT_DOWNLOAD_DIR, 0755);
+    if (stat(downloaded_filename, &st)  == -1) {
+        if (errno == ENOENT) {
+            offset = 0; // local file is not exist
+        } else {
+            perror("stat");
+            return -1;
+        }
+    } else {
+        offset = (uint64_t)st.st_size;
     }
-    file_fd = open(downloaded_filename, O_CREAT | O_RDWR | O_TRUNC, 0666);
+    resume.offset = host_to_net_u64(offset);
+    send_packet(client_state->sock_fd, CMD_RESUME_POS, STATUS_OK, &resume, sizeof(resume));
+
+    if (offset > 0) {
+        printf("resume gets from position %lu\n", offset);
+    }
+
+    // 4. open file, lseek
+    file_fd = open(downloaded_filename, O_CREAT | O_WRONLY | O_APPEND, 0666);
     if (file_fd == -1) {
         perror("open");
         return -1;
     }
-    // 4. loop recv CMD_FILE_DATA
+
+    // 5. loop recv CMD_FILE_DATA
     // recv file data
     int got_file_end = 0;   // file end flag
-    while (recved < file_size) {
+    while (recved < file_size - offset) {
         memset(&packet, 0, sizeof(packet));
 
         if (recv_packet(client_state->sock_fd, &packet) != 0) {
@@ -347,6 +425,7 @@ static int handle_gets(client_state_t* client_state, const command_request_t* re
             return -1;
         }
 
+        // 6. recv CMD_FILE_END
         if (packet.header.cmd_type == CMD_FILE_END) {
             got_file_end = 1;
             free_packet(&packet);
@@ -360,17 +439,15 @@ static int handle_gets(client_state_t* client_state, const command_request_t* re
             return -1;
         }
 
-        memcpy(&chunk, packet.payload, sizeof(chunk));
-
-        chunk_size = ntohl(chunk.data_len);
-        if (chunk_size == 0 || chunk_size > FILE_BLOCK_SIZE) {
+        chunk_size = packet.header.data_len; 
+        if (chunk_size == 0 || chunk_size > FILE_CHUNK_SIZE) {
             free_packet(&packet);
             send_packet(client_state->sock_fd, CMD_ERROR, STATUS_PROTOCOL_ERROR, NULL, 0);
             close(file_fd);
             return -1;
         }
 
-        nwrited = write(file_fd, chunk.data, chunk_size);
+        nwrited = write(file_fd, packet.payload, chunk_size);
         if (nwrited != (ssize_t)chunk_size) {
             free_packet(&packet);
             send_packet(client_state->sock_fd, CMD_ERROR, STATUS_IO_ERROR, NULL, 0);
@@ -382,8 +459,7 @@ static int handle_gets(client_state_t* client_state, const command_request_t* re
         free_packet(&packet);
     }
 
-    //  6. check recved == file_size
-    if (recved == file_size) {
+    if (recved == file_size - offset) {
         if (!got_file_end) {
             if (recv_packet(client_state->sock_fd, &packet) != 0) {
                 send_packet(client_state->sock_fd, CMD_ERROR, STATUS_IO_ERROR, NULL, 0);
@@ -400,7 +476,7 @@ static int handle_gets(client_state_t* client_state, const command_request_t* re
             free_packet(&packet);
         }
 
-        // 7. send ACK or ERROR
+        // 7. send ACK or ERROR  
         close(file_fd);
         send_packet(client_state->sock_fd, CMD_ACK, STATUS_OK, NULL, 0);
         printf("gets file %s completed\n", file_name);

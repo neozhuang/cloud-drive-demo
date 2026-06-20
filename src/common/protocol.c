@@ -178,6 +178,28 @@ int send_packet(int fd, cmd_type_t type, status_code_t status, const void *paylo
     return 0;
 }
 
+int send_packet_header(int fd, cmd_type_t type, status_code_t status, uint32_t payload_len)
+{
+    tlv_header_t header = {
+        .magic = htonl(TLV_MAGIC),
+        .version = htonl(TLV_VERSION),
+        .cmd_type = htonl((uint32_t)type),
+        .status = htonl((uint32_t)status),
+        .data_len = htonl(payload_len)
+    };
+
+    // defensive check
+    if (payload_len > MAX_PACKET_PAYLOAD) {
+        return -1;
+    }
+
+    // send packet header
+    if (send_n(fd, &header, sizeof(header)) != 0) {
+        return -1;
+    }
+    return 0;
+}
+
 int recv_packet(int fd, packet_t *packet)
 {
     /*

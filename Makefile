@@ -30,15 +30,15 @@ CLIENT_OBJS := $(patsubst src/%.c,build/%.o,$(CLIENT_SRCS))
 
 all: server client
 
-server: bin/cdd-server
+server: bin/server-cdd
 
-client: bin/cdd-client
+client: bin/client-cdd
 
-bin/cdd-server: $(COMMON_OBJS) $(SERVER_OBJS)
+bin/server-cdd: $(COMMON_OBJS) $(SERVER_OBJS)
 	mkdir -p bin
 	$(CC) $(CFLAGS) $^ -o $@ -lpthread
 
-bin/cdd-client: $(COMMON_OBJS) $(CLIENT_OBJS)
+bin/client-cdd: $(COMMON_OBJS) $(CLIENT_OBJS)
 	mkdir -p bin
 	$(CC) $(CFLAGS) $^ -o $@ -lpthread
 
