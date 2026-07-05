@@ -1,5 +1,7 @@
 #pragma once
 
+#include <linux/limits.h>
+
 typedef enum client_status_e {
     CLIENT_STATE_INIT = 0,
     CLIENT_STATE_DISCONNECTED,
@@ -14,6 +16,7 @@ typedef struct client_state_s {
     client_status_t status;
     int sock_fd;
     char username[64];
-    char remote_cwd[256];
+    char remote_cwd[PATH_MAX];
+    char download_dir[PATH_MAX];
 } client_state_t;
 

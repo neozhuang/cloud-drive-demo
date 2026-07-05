@@ -25,8 +25,17 @@ cmd_type_t str_to_cmd_type(const char *cmd)
     if (strcmp(cmd, "ls") == 0) {
         return CMD_LS;
     }
+    if (strcmp(cmd, "ll") == 0) {
+        return CMD_LL;
+    }
+    if (strcmp(cmd, "tree") == 0) {
+        return CMD_TREE;
+    }
     if (strcmp(cmd, "rm") == 0 || strcmp(cmd, "remove") == 0) {
         return CMD_RM;
+    }
+    if (strcmp(cmd, "cat") == 0) {
+        return CMD_CAT;
     }
     if (strcmp(cmd, "mkdir") == 0) {
         return CMD_MKDIR;
@@ -55,7 +64,10 @@ const char* cmd_type_to_str(cmd_type_t type)
         case CMD_PWD:       return "pwd";
         case CMD_CD:        return "cd";
         case CMD_LS:        return "ls";
+        case CMD_LL:        return "ll";
+        case CMD_TREE:      return "tree";
         case CMD_RM:        return "rm";
+        case CMD_CAT:       return "cat";
         case CMD_MKDIR:     return "mkdir";
         case CMD_RMDIR:     return "rmdir";
         case CMD_PUTS_REQ:  return "puts";
@@ -122,6 +134,7 @@ int send_n(int fd, const void *buf, size_t len)
 
     return 0;
 }
+
 int recv_n(int fd, void *buf, size_t len)
 {
     char *ptr = (char *)buf;
@@ -338,4 +351,38 @@ int parse_command_request(const char *input, command_request_t *req) {
  */
 int build_command_request(const char *input, command_request_t *req) {
     return parse_command_request(input, req);
+}
+
+void print_text_from_packet(const packet_t *packet) {
+    char payload[MAX_PACKET_PAYLOAD];
+    size_t len;
+
+    if (packet->payload != NULL && packet->header.data_len > 0U) {
+        len = packet->header.data_len;
+        if (len >= sizeof(payload)) {
+            len = sizeof(payload) - 1;
+        }
+        memcpy(payload, packet->payload, len);
+        payload[len] = '\0';
+        printf("%s\n", payload);
+    }
+}
+
+int get_text_from_packet(const packet_t* packet, char* text, int size)
+{
+    if (packet->payload != NULL && packet->header.data_len > 0U && packet->header.data_len < (unsigned int)size) {
+        memcpy(text, packet->payload, packet->header.data_len);
+        text[packet->header.data_len] = '\0';
+        return 0;
+    }
+    return -1;
+}
+
+int send_puts_resume(int client_fd, uint64_t offset)
+{
+    resume_payload_t resume;
+
+    resume.offset = host_to_net_u64(offset);
+    return send_packet(client_fd, CMD_PUTS_RESP, STATUS_OK,
+                       &resume, sizeof(resume));
 }

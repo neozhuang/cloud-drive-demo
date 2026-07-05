@@ -2,47 +2,57 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
-#include <stdlib.h>
 
-#include "common/utils.h"
+#include "inih/ini.h"
+
+static int handler(void* user, const char* section, const char* name,
+                   const char* value)
+{
+    client_config_t* pconfig = (client_config_t*)user;
+
+    #define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
+    if (MATCH("remote", "host")) {
+        strncpy(pconfig->remote.host, value, strlen(value));
+        pconfig->remote.host[strlen(value)] = '\0';
+    } else if (MATCH("remote", "port")) {
+        strncpy(pconfig->remote.port, value, strlen(value));
+        pconfig->remote.port[strlen(value)] = '\0';
+    } else if (MATCH("log", "log_level")) {
+        strncpy(pconfig->log.log_level, value, strlen(value));
+        pconfig->log.log_level[strlen(value)] = '\0';
+    } else if (MATCH("log", "log_file")) {
+        strncpy(pconfig->log.log_file, value, strlen(value));
+        pconfig->log.log_file[strlen(value)] = '\0';
+    } else if (MATCH("storage", "download_dir")) {
+        strncpy(pconfig->storage.download_dir, value, strlen(value));
+        pconfig->storage.download_dir[strlen(value)] = '\0';
+    } else {
+        return 0;  /* unknown section/name, error */
+    }
+    return 1;
+}
 
 int client_config_load(client_config_t *config, const char *filename)
 {
-    FILE* fp;
-    char* key;
-    char* value;
-    char* eq;
-    char line[4096];
-
-    if ((fp = fopen(filename, "r")) == NULL) {
-        printf("failed to open file %s\n", filename);
+    if (ini_parse(filename, handler, config) < 0) {
+        printf("Cannot load %s\n", filename);
         return -1;
     }
-    while (fgets(line, sizeof(line), fp) != NULL) {
-        // line: server_ip = 127.0.0.1
-        line[strcspn(line, "\n")] = '\0';
-        eq = strchr(line, '=');
-        if (eq) {
-            *eq = '\0';
-            key = trim(line);
-            value = trim(eq + 1);
-        } else { 
-            // value is null jump this line
-            continue;
-        }
-        if (strcasecmp(key, "server_ip") == 0) {
-            strcpy(config->server_ip, value);
-        } else if (strcasecmp(key, "server_port") == 0) {
-            strcpy(config->server_port, value);
-        }
-    }
-
     return 0;
 }
 
 void client_config_print(const client_config_t *config)
 {
-    printf("server_ip = %s\n", config->server_ip);
-    printf("server_port = %s\n", config->server_port);
+    printf("[remote]\n");
+    printf("host = %s\n", config->remote.host);
+    printf("port = %s\n", config->remote.port);
+
+    printf("\n[log]\n");
+    printf("log_level = %s\n", config->log.log_level);
+    printf("log_file = %s\n", config->log.log_file);
+
+    printf("\n[storage]\n");
+    printf("download_dir = %s\n", config->storage.download_dir);
+
+    printf("\n");
 }

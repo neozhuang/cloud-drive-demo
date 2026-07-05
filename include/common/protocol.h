@@ -1,6 +1,7 @@
 #pragma once
 
 #include <limits.h>
+#include <linux/limits.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -64,12 +65,16 @@
 typedef enum {
     CMD_INVALID = 0,        // invalid command
     CMD_LOGIN_REQ,          // user login request
+    CMD_REGISTER_REQ,       // user register request
     CMD_PWD,         
     CMD_CD,          
     CMD_LS,          
+    CMD_LL,
+    CMD_TREE,
     CMD_MKDIR,       
     CMD_RMDIR,
     CMD_RM,          
+    CMD_CAT,
     CMD_PUTS_REQ,    
     CMD_PUTS_RESP,   /* puts response：server return offset */
     CMD_GETS_REQ,
@@ -86,11 +91,21 @@ typedef enum {
  */
 typedef enum {
     STATUS_OK = 0,          // success
-    STATUS_CD_OK = 1,       // current dir has changed
     STATUS_BAD_REQUEST = 2,   /* 请求格式错误、参数错误 */
     STATUS_NOT_FOUND = 3,     /* 文件或目录不存在 */
     STATUS_IO_ERROR = 4,      /* 本地 IO 错误，例如 open/mkdir/remove 失败 */
-    STATUS_PROTOCOL_ERROR = 5 /* 协议流程或包格式错误 */
+    STATUS_PROTOCOL_ERROR = 5, /* 协议流程或包格式错误 */
+    STATUS_USER_NOTEXIST,       // user not exist
+    STATUS_PASSWD_ERROR,        // password error
+    STATUS_OTHER_ERROR,
+    STATUS_NOT_DIR,             // cd, not dir
+    STATUS_IS_DIR,              // rm, is dir
+    STATUS_DIR_NOTEXIST,         // cd, dir not exist
+    STATUS_DIR_ALREADY_EXISTS,   // mkdir, dir already exists
+    STATUS_DIR_NOTEMPTY,         // rmdir, dir not empty
+    STATUS_FILE_NOTEXIST,        // rm, file not exist
+
+    STATUS_DB_ERROR,
 } status_code_t;
 
 /*
@@ -151,8 +166,9 @@ typedef struct {
  * for puts/gets
  */
 typedef struct {
-    char file_name[PATH_MAX]; 
+    char file_name[NAME_MAX];
     uint64_t file_size;
+    char sha256_hex[65];
 } file_info_payload_t;
 
 /*
@@ -222,3 +238,12 @@ int recv_packet(int fd, packet_t *packet);
  */
 void free_packet(packet_t *packet);
 
+/*
+ * print_text_from_packet:
+ * print packet payload as text when the packet contains a text response.
+ */
+void print_text_from_packet(const packet_t *packet);
+
+int get_text_from_packet(const packet_t* packet, char* text, int size);
+
+int send_puts_resume(int client_fd, uint64_t offset);

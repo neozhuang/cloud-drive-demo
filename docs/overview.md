@@ -110,3 +110,67 @@ Planned optimizations include:
 - On the client side, use `mmap` for files larger than a configured threshold.
 - On the server side, use `sendfile` when sending large files to the client.
 - Make the threshold configurable so different environments can tune performance behavior.
+
+## Phase 3: Database Support
+
+The third phase introduces database-backed metadata and account management. Instead of relying only on the physical file-system layout, the server can use database tables to describe users, directories, files, ownership, and transfer state.
+
+### Database-Backed File Structure
+
+Earlier phases may maintain a virtual directory forest in memory or on disk to isolate files between users and between directories owned by the same user. This model is intuitive, but it makes the server-side file organization more complicated as the system grows.
+
+The purpose of the directory forest is to represent relationships:
+
+- Which directories belong to which user.
+- Which directories are children of other directories.
+- Which files are contained in each directory.
+- Where each logical file is stored on the server.
+
+In this phase, these relationships should be moved into database tables. The database can store directory-to-directory relationships, directory-to-file relationships, file ownership, file metadata, and the real storage path of each file.
+
+Each physical file can be stored using a content-based alias, such as its hash value. With this design, the server no longer needs to mirror every user's logical directory tree as real directories on disk. Files from all users and all logical directories can be stored in a common server storage directory, while the database describes how those files appear to each user.
+
+### User Accounts And Authentication
+
+Database support also makes it possible to manage application users independently from system accounts.
+
+A user table can store information such as:
+
+- Username.
+- Password hash.
+- Per-user random salt.
+- User status.
+- Creation and update timestamps.
+
+During registration, the server should generate a random salt for the user, combine the salt with the original password, compute a secure password hash, and store only the hash and salt in the database.
+
+During login, the server should look up the user by username, read the stored salt, hash the submitted password using the same algorithm, and compare the computed hash with the stored password hash. The raw password should never be stored.
+
+Optional account features can include:
+
+- User logout.
+- User disable or lock status.
+- Password reset or password change.
+
+### Instant Upload By File Hash
+
+The database can also support instant upload behavior.
+
+Before uploading file content, the client can calculate the file hash and send it to the server. The server then checks whether a file with the same hash already exists in storage.
+
+If the file already exists, the server only needs to create a new logical file record for the current user and directory. The client does not need to upload the same content again.
+
+If the file does not exist, the server creates the necessary metadata and receives the file content normally.
+
+This feature reduces duplicate storage and avoids unnecessary network transfer.
+
+### Upload State Tracking
+
+The server must avoid exposing incomplete files as valid user files. Several designs are possible:
+
+- Add a transfer-status field to the file metadata table. New uploads start with an incomplete status and are marked complete only after the file content is fully received and verified.
+- Use a separate upload-session table for in-progress uploads. After the upload succeeds, move or promote the record into the main file metadata table.
+- Use another equivalent design, as long as incomplete uploads cannot be used as normal files.
+
+This state tracking is especially important when combined with resumable upload and instant upload logic.
+
