@@ -16,11 +16,17 @@ typedef struct storage_config_s {
     char download_dir[PATH_MAX];
 } storage_config_t;
 
+typedef struct transfer_config_s {
+    int max_concurrent;
+    int connect_timeout_ms;
+    int io_timeout_ms;
+} transfer_config_t;
+
 typedef struct client_config_s {
     remote_config_t remote;
     log_config_t log;
     storage_config_t storage;
+    transfer_config_t transfer;
 } client_config_t;
 
 int client_config_load(client_config_t *config, const char *path);
-void client_config_print(const client_config_t *config);

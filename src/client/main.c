@@ -1,137 +1,150 @@
-#include <linux/limits.h>
+#include <signal.h>
 #include <stdio.h>
-#include <unistd.h>
-#include <limits.h>
 #include <string.h>
 
+#include "client/command.h"
 #include "client/config.h"
-#include "client/state.h"
-#include "client/network.h"
-#include "client/user_auth.h"
-#include "common/protocol.h"
-#include "common/utils.h"
-#include "client/handler.h"
-#include "common/tui.h"
-#include "common/log.h"
+#include "client/connection.h"
 #include "client/menu.h"
+#include "client/runtime.h"
+#include "client/transfer.h"
+#include "client/user_auth.h"
+#include "common/log.h"
+#include "common/protocol.h"
+#include "common/tui.h"
+#include "common/utils.h"
 
+static int load_paths_and_config(int argc, char **argv, client_config_t *config,
+                                 char *project_dir, char *download_dir,
+                                 char *log_file)
+{
+    char config_path[PATH_MAX];
+    int written;
 
-int main(int argc, char *argv[]) {
-    int sock_fd;
-    client_config_t config;         // client config
-    client_state_t client_state;
-    char project_dir[PATH_MAX];     // cloud-drive-demo
-    char config_path[PATH_MAX];     // config file path
-    char log_file[PATH_MAX];        // log file absolute path 
-    char download_dir[PATH_MAX];    // client download directory
-    char input[PATH_MAX];           // user input request
+    if (argc > 2) {
+        fprintf(stderr, "usage: %s [config-file]\n", argv[0]);
+        return -1;
+    }
+    if (get_project_dir(project_dir, PATH_MAX) != 0) {
+        fprintf(stderr, "failed to locate project directory\n");
+        return -1;
+    }
+    if (argc == 2) {
+        written = snprintf(config_path, sizeof(config_path), "%s", argv[1]);
+        if (written < 0 || (size_t)written >= sizeof(config_path)) {
+            fprintf(stderr, "config path is too long\n");
+            return -1;
+        }
+    } else if (join_path(config_path, sizeof(config_path), project_dir,
+                         "config/client.conf") != 0) {
+        return -1;
+    }
 
-    /* Print a beautiful banner and the current time */
+    if (client_config_load(config, config_path) != 0) {
+        fprintf(stderr, "invalid client configuration: %s\n", config_path);
+        return -1;
+    }
+    if (join_path(log_file, PATH_MAX, project_dir, config->log.log_file) != 0 ||
+        join_path(download_dir, PATH_MAX, project_dir,
+                  config->storage.download_dir) != 0) {
+        fprintf(stderr, "configured path is too long\n");
+        return -1;
+    }
+    return 0;
+}
+
+int main(int argc, char *argv[])
+{
+    client_config_t config;
+    client_runtime_t runtime;
+    client_command_result_t command_result;
+    char project_dir[PATH_MAX];
+    char download_dir[PATH_MAX];
+    char log_file[PATH_MAX];
+    char input[MAX_COMMAND_INPUT];
+    char username[64];
+    char cwd[PATH_MAX];
+    session_id_t session_id;
+    int runtime_initialized = 0;
+    int logging_initialized = 0;
+    int exit_code = 1;
+
+    memset(&runtime, 0, sizeof(runtime));
+    runtime.control_fd = -1;
     tui_print_banner();
     tui_print_time("Cloud Drive Demo Client");
 
-    /* Accept an optional config path; otherwise fall back to config/client.conf
-     * under the detected project directory.
-     */
-    if (argc > 2) {
-        fprintf(stderr, "usage: %s [config-file]\n", argv[0]);
-        return 1;
+    if (load_paths_and_config(argc, argv, &config, project_dir, download_dir,
+                              log_file) != 0) {
+        goto cleanup;
     }
-    if (argc == 2) {
-        strcpy(config_path, argv[1]);
-    } else {
-        if (get_project_dir(project_dir, sizeof(project_dir)) != 0)
-            return -1; 
-        if(join_path(config_path, sizeof(config_path), project_dir, "config/client.conf") != 0)
-            return -1;
-    }
-
-    /* Load and print the client configuration before opening the connection. */
-    if(client_config_load(&config, config_path) != 0)
-        return -1;
-    // client_config_print(&config);
-
-    // Initialize logging before network startup so later failures are recorded.
-    if (join_path(log_file, sizeof(log_file), project_dir, config.log.log_file) != 0)
-        return -1;
     if (ensure_parent_dir(log_file) != 0) {
-        return -1;
+        perror("create log directory");
+        goto cleanup;
     }
     if (log_init(config.log.log_level, log_file) != 0) {
         fprintf(stderr, "log_init failed, fallback to stdout\n");
     }
-
-    // Initialize download directory.
-    if (join_path(download_dir, sizeof(download_dir), project_dir, config.storage.download_dir) != 0)
-        return -1;
-    if (ensure_parent_dir(download_dir) != 0) {
-        return -1;
+    logging_initialized = 1;
+    if (mkdir_p(download_dir, 0755) != 0) {
+        perror("create download directory");
+        goto cleanup;
     }
-    memset(&client_state, 0, sizeof(client_state));
-    strncpy(client_state.download_dir, download_dir, sizeof(download_dir) - 1);
-    client_state.download_dir[sizeof(download_dir) - 1] = '\0';
+    if (client_runtime_init(&runtime, &config, download_dir) != 0) {
+        LOG_ERROR("Failed to initialize client runtime");
+        goto cleanup;
+    }
+    runtime_initialized = 1;
 
-    /* Connect to the configured server and initialize connection state. */
-    sock_fd = network_connect(&client_state, config.remote.host, config.remote.port);
-    if (sock_fd < 0) {
+    signal(SIGPIPE, SIG_IGN);
+
+    runtime.control_fd = client_connection_open(
+        config.remote.host, config.remote.port,
+        config.transfer.connect_timeout_ms, config.transfer.io_timeout_ms);
+    if (runtime.control_fd < 0) {
         LOG_ERROR("Failed to connect server");
-        return -1;
+        goto cleanup;
     }
     LOG_INFO("Connected to remote server");
 
-    while (1) {
-        int auth_result = user_auth(&client_state);
+    if (user_auth(&runtime) != AUTH_OK) {
+        // Only AUTH_EXIT
+        printf("bye, have a good day!\n");
+        exit_code = 0;  // Normal exit
+        goto cleanup;
+    }
 
-        if (auth_result == AUTH_EXIT) {
-            printf("bye, have a good day!\n");
+    tui_clear_screen();
+    menu_show_help();
+
+    while (1) {
+        transfer_manager_drain_events(runtime.transfers);
+        if (client_runtime_session_snapshot(&runtime, &session_id,
+                                            username, sizeof(username),
+                                            cwd, sizeof(cwd)) != 0) {
+            LOG_ERROR("Session is no longer available");
             break;
         }
-        if (auth_result != AUTH_OK) {
-            continue;
+        printf("%s@cloud-drive:%s> ", username, cwd);
+        fflush(stdout);
+        if (s_gets(input, sizeof(input)) == NULL) {
+            break;
         }
-
-        // Here auth_result == AUTH_OK 
-        LOG_INFO("User %s login success", client_state.username);
-
-        // clear screen and show available commands
-        tui_clear_screen();
-        menu_show_help();
-
-        /* Interactive command loop: show prompt, read input, and dispatch commands. */
-        while (1) {
-            printf("%s@cloud-drive:%s> ", client_state.username, client_state.remote_cwd);
-            fflush(stdout);
-
-            // EOF or input error exits the loop cleanly.
-            if (s_gets(input, sizeof(input)) == NULL) {
-                break;
-                // continue to menu choose
-            }
-
-            // Let the user exit with common shell-like commands.
-            if (strcasecmp(input, "quit") == 0 || strcasecmp(input, "exit") == 0) {
-                printf("bye, have a good day!\n");
-                LOG_INFO("client exit, current user: %s", client_state.username);
-                goto cleanup;
-            }
-
-            // show help menu
-            if (strcasecmp(input, "help") == 0 || strcasecmp(input, "h") == 0) {
-                menu_show_help();
-                continue;
-            }
-
-            // user enter the empty line, just continue
-            if (strlen(input) == 0) {
-                continue;
-            }
-
-            handle_command_input(&client_state, input);
+        command_result = client_command_execute(&runtime, input);
+        if (command_result == CLIENT_COMMAND_EXIT) {
+            break;
         }
     }
 
+    printf("bye, have a good day!\n");
+    exit_code = 0;
+
 cleanup:
-    close(sock_fd);
-    log_close();
-    return 0;
+    if (runtime_initialized) {
+        client_runtime_destroy(&runtime);
+    }
+    if (logging_initialized) {
+        log_close();
+    }
+    return exit_code;
 }

@@ -5,103 +5,34 @@
 #include <errno.h>
 #include <arpa/inet.h>
 #include <stdlib.h>
-#include <stdio.h>
 
-/*
- * str_to_cmd_type
- * parse string to cmd_type_t
- */
-cmd_type_t str_to_cmd_type(const char *cmd)
+const char *cmd_type_to_str(cmd_type_t type)
 {
-    if (cmd == NULL || *cmd == '\0') {
-        return CMD_INVALID;
-    }
-    if (strcmp(cmd, "pwd") == 0) {
-        return CMD_PWD;
-    }
-    if (strcmp(cmd, "cd") == 0) {
-        return CMD_CD;
-    }
-    if (strcmp(cmd, "ls") == 0) {
-        return CMD_LS;
-    }
-    if (strcmp(cmd, "ll") == 0) {
-        return CMD_LL;
-    }
-    if (strcmp(cmd, "tree") == 0) {
-        return CMD_TREE;
-    }
-    if (strcmp(cmd, "rm") == 0 || strcmp(cmd, "remove") == 0) {
-        return CMD_RM;
-    }
-    if (strcmp(cmd, "cat") == 0) {
-        return CMD_CAT;
-    }
-    if (strcmp(cmd, "mkdir") == 0) {
-        return CMD_MKDIR;
-    }
-    if (strcmp(cmd, "rmdir") == 0) {
-        return CMD_RMDIR;
-    }
-    if (strcmp(cmd, "puts") == 0) {
-        return CMD_PUTS_REQ;
-    }
-    if (strcmp(cmd, "gets") == 0) {
-        return CMD_GETS_REQ;
-    }
+    static const char *names[CMD_ERROR + 1] = {
+        [CMD_LOGIN_REQ] = "login", [CMD_PWD] = "pwd", [CMD_CD] = "cd",
+        [CMD_LS] = "ls", [CMD_LL] = "ll", [CMD_TREE] = "tree",
+        [CMD_RM] = "rm", [CMD_CAT] = "cat", [CMD_MKDIR] = "mkdir",
+        [CMD_RMDIR] = "rmdir", [CMD_PUTS_REQ] = "puts",
+        [CMD_GETS_REQ] = "gets", [CMD_PUTS_RESP] = "puts_resp",
+        [CMD_GETS_RESP] = "gets_resp", [CMD_RESUME_POS] = "resume_pos",
+        [CMD_FILE_DATA] = "file_data", [CMD_FILE_END] = "file_end",
+        [CMD_ACK] = "ack", [CMD_ERROR] = "error"
+    };
 
-    return CMD_INVALID;
-}
-
-/*
- * cmd_type_to_str
- * parse cmd_type_t to string
- */
-const char* cmd_type_to_str(cmd_type_t type)
-{
-    switch (type) {
-        case CMD_LOGIN_REQ: return "login";
-        case CMD_PWD:       return "pwd";
-        case CMD_CD:        return "cd";
-        case CMD_LS:        return "ls";
-        case CMD_LL:        return "ll";
-        case CMD_TREE:      return "tree";
-        case CMD_RM:        return "rm";
-        case CMD_CAT:       return "cat";
-        case CMD_MKDIR:     return "mkdir";
-        case CMD_RMDIR:     return "rmdir";
-        case CMD_PUTS_REQ:  return "puts";
-        case CMD_GETS_REQ:  return "gets";
-        case CMD_PUTS_RESP: return "puts_resp";
-        case CMD_GETS_RESP: return "gets_resp";
-        case CMD_RESUME_POS:return "resume_pos";
-        case CMD_FILE_DATA: return "file_data";
-        case CMD_FILE_END:  return "file_end";
-        case CMD_ACK:       return "ack";
-        case CMD_ERROR:     return "error";
-        case CMD_INVALID:
-        default:
-            return "invalid";
-    }
+    return type > CMD_INVALID && type <= CMD_ERROR && names[type] != NULL
+        ? names[type] : "invalid";
 }
 
 
 /*
  * host_to_net_u64 / net_to_host_u64:
  * transfer 64 int to and from between host and net bytes order
- *
- * why do it ourselves?
- * htonl/ntohl use uint32_t
  */
 uint64_t host_to_net_u64(uint64_t value)
 {
     uint32_t high = htonl((uint32_t)(value >> 32));
     uint32_t low = htonl((uint32_t)(value & 0xffffffffU));
 
-    /*
-     * caution:
-     * net byte order:
-     */
     return ((uint64_t)low << 32) | high;
 }
 
@@ -161,228 +92,182 @@ int recv_n(int fd, void *buf, size_t len)
     return 0;
 }
 
-int send_packet(int fd, cmd_type_t type, status_code_t status, const void *payload, uint32_t payload_len)
+enum {
+    WIRE_MAGIC_OFFSET = 0,
+    WIRE_VERSION_OFFSET = 4,
+    WIRE_TYPE_OFFSET = 8,
+    WIRE_STATUS_OFFSET = 12,
+    WIRE_PAYLOAD_LEN_OFFSET = 16,
+    WIRE_SESSION_ID_OFFSET = 20
+};
+
+static void write_net_u32(unsigned char *dst, uint32_t value)
 {
-    tlv_header_t header = {
-        .magic = htonl(TLV_MAGIC),
-        .version = htonl(TLV_VERSION),
-        .cmd_type = htonl((uint32_t)type),
-        .status = htonl((uint32_t)status),
-        .data_len = htonl(payload_len)
-    };
+    uint32_t net_value = htonl(value);
+    memcpy(dst, &net_value, sizeof(net_value));
+}
 
-    // defensive check
-    if (payload_len > MAX_PACKET_PAYLOAD) {
+static uint32_t read_net_u32(const unsigned char *src)
+{
+    uint32_t net_value;
+    memcpy(&net_value, src, sizeof(net_value));
+    return ntohl(net_value);
+}
+
+static void encode_wire_header(
+    unsigned char wire_header[TLV_WIRE_HEADER_SIZE],
+    const packet_header_t *header)
+{
+    memset(wire_header, 0, TLV_WIRE_HEADER_SIZE);
+    write_net_u32(wire_header + WIRE_MAGIC_OFFSET, TLV_MAGIC);
+    write_net_u32(wire_header + WIRE_VERSION_OFFSET, TLV_VERSION);
+    write_net_u32(wire_header + WIRE_TYPE_OFFSET, (uint32_t)header->type);
+    write_net_u32(wire_header + WIRE_STATUS_OFFSET, (uint32_t)header->status);
+    write_net_u32(wire_header + WIRE_PAYLOAD_LEN_OFFSET, header->payload_len);
+    memcpy(wire_header + WIRE_SESSION_ID_OFFSET,
+           header->session_id.bytes,
+           SESSION_ID_SIZE);
+}
+
+int packet_init(packet_t *packet,
+                cmd_type_t type,
+                status_code_t status,
+                const session_id_t *session_id,
+                const void *payload,
+                uint32_t payload_len)
+{
+    if (packet == NULL || payload_len > MAX_PACKET_PAYLOAD ||
+        (payload_len > 0U && payload == NULL)) {
         return -1;
     }
 
-    // send packet header
-    if (send_n(fd, &header, sizeof(header)) != 0) {
-        return -1;
+    memset(packet, 0, sizeof(*packet));
+    packet->header.type = type;
+    packet->header.status = status;
+    packet->header.payload_len = payload_len;
+    if (session_id != NULL) {
+        packet->header.session_id = *session_id;
     }
-
-    // only payload_len > 0 and payload is not null 
-    if (payload_len > 0 && payload != NULL) {
-        if (send_n(fd, payload, payload_len) != 0) {
-            return -1;
-        }
-    }
-
+    packet->payload = (void *)payload;
     return 0;
 }
 
-int send_packet_header(int fd, cmd_type_t type, status_code_t status, uint32_t payload_len)
+int protocol_send_header(int fd, const packet_header_t *header)
 {
-    tlv_header_t header = {
-        .magic = htonl(TLV_MAGIC),
-        .version = htonl(TLV_VERSION),
-        .cmd_type = htonl((uint32_t)type),
-        .status = htonl((uint32_t)status),
-        .data_len = htonl(payload_len)
-    };
+    unsigned char wire_header[TLV_WIRE_HEADER_SIZE];
 
-    // defensive check
-    if (payload_len > MAX_PACKET_PAYLOAD) {
+    if (header == NULL || header->payload_len > MAX_PACKET_PAYLOAD) {
         return -1;
     }
 
-    // send packet header
-    if (send_n(fd, &header, sizeof(header)) != 0) {
+    encode_wire_header(wire_header, header);
+    return send_n(fd, wire_header, sizeof(wire_header));
+}
+
+int protocol_send_packet(int fd, const packet_t *packet)
+{
+    if (packet == NULL || packet->header.payload_len > MAX_PACKET_PAYLOAD ||
+        (packet->header.payload_len > 0U && packet->payload == NULL)) {
+        return -1;
+    }
+
+    if (protocol_send_header(fd, &packet->header) != 0) {
+        return -1;
+    }
+
+    if (packet->header.payload_len > 0U &&
+        send_n(fd, packet->payload, packet->header.payload_len) != 0) {
         return -1;
     }
     return 0;
 }
 
-int recv_packet(int fd, packet_t *packet)
+int protocol_recv_packet(int fd, packet_t *packet)
 {
-    /*
-     * unpack packet order:
-     * 1. read fixed header
-     * 2. translate header field from net byte order to host byte order
-     * 3. check magic / version / data_len
-     * 4. if exists payload, then malloc to read it
-     */
-    tlv_header_t wire_header;
-    uint32_t payload_len;
+    unsigned char wire_header[TLV_WIRE_HEADER_SIZE];
+    uint32_t magic;
+    uint32_t version;
 
     if (packet == NULL) {
         return -1;
     }
 
     memset(packet, 0, sizeof(*packet));
-
-    // first read 20 bytes protocol header
-    if (recv_n(fd, &wire_header, sizeof(wire_header)) != 0) {
+    if (recv_n(fd, wire_header, sizeof(wire_header)) != 0) {
         return -1;
     }
 
-    // recved data is net byte order, translate it to host byte order
-    packet->header.magic = ntohl(wire_header.magic);
-    packet->header.version = ntohl(wire_header.version);
-    packet->header.cmd_type = ntohl(wire_header.cmd_type);
-    packet->header.status = ntohl(wire_header.status);
-    packet->header.data_len = ntohl(wire_header.data_len);
-
-    // check magic and version, if abnormal, then the data packet may be not ours
-    if (packet->header.magic != TLV_MAGIC || packet->header.version != TLV_VERSION) {
+    magic = read_net_u32(wire_header + WIRE_MAGIC_OFFSET);
+    version = read_net_u32(wire_header + WIRE_VERSION_OFFSET);
+    if (magic != TLV_MAGIC || version != TLV_VERSION) {
         return -1;
     }
 
-    payload_len = packet->header.data_len;
+    packet->header.type =
+        (cmd_type_t)read_net_u32(wire_header + WIRE_TYPE_OFFSET);
+    packet->header.status =
+        (status_code_t)read_net_u32(wire_header + WIRE_STATUS_OFFSET);
+    packet->header.payload_len =
+        read_net_u32(wire_header + WIRE_PAYLOAD_LEN_OFFSET);
+    memcpy(packet->header.session_id.bytes,
+           wire_header + WIRE_SESSION_ID_OFFSET,
+           SESSION_ID_SIZE);
 
-    // limit packet length to avoid bad guy send super packet malicously.
-    if (payload_len > MAX_PACKET_PAYLOAD) {
+    if (packet->header.payload_len > MAX_PACKET_PAYLOAD) {
         return -1;
     }
-
-    // no payload
-    if (payload_len == 0) {
+    if (packet->header.payload_len == 0U) {
         return 0;
     }
 
-    // malloc memory for payload
-    packet->payload = calloc(1, payload_len);
+    packet->payload = malloc(packet->header.payload_len);
     if (packet->payload == NULL) {
         return -1;
     }
+    packet->owns_payload = true;
 
-    if (recv_n(fd, packet->payload, payload_len) != 0) {
-        free_packet(packet);
+    if (recv_n(fd, packet->payload, packet->header.payload_len) != 0) {
+        packet_release(packet);
         return -1;
     }
-
     return 0;
 }
 
-/*
- * free_packet:
- * free payload memory that malloced by recv_packet
- * make the header be zero to invaild the packet
- */
-void free_packet(packet_t *packet)
+void packet_release(packet_t *packet)
 {
     if (packet == NULL) {
         return;
     }
-
-    free(packet->payload);
-    packet->payload = NULL;
-    memset(&packet->header, 0, sizeof(packet->header));
+    if (packet->owns_payload) {
+        free(packet->payload);
+    }
+    memset(packet, 0, sizeof(*packet));
 }
 
-/*
- * fill_request:
- * put cmd_type_t and arg to command_request_t safely
- */
-static int fill_request(cmd_type_t type, const char *arg, command_request_t *req) {
-    if (req == NULL) {
-        return -1;
-    }
-
-    memset(req, 0, sizeof(*req));
-
-    req->type = type;
-
-    // arg can be null, e.x., pwd, ls
-    if (arg != NULL) {
-        strncpy(req->arg, arg, sizeof(req->arg));
-        req->arg[sizeof(req->arg) - 1] = '\0';
-    }
-    return 0;
-}
-
-/*
- * parse_command_request:
- * parse command line to cmd + arg
- * example：
- *   "mkdir demo"
- * will be parsed：
- *   cmd = "mkdir"
- *   arg = "demo"
- */
-int parse_command_request(const char *input, command_request_t *req) {
-    char cmd[64] = {0};
-    char arg[MAX_COMMAND_ARG] = {0};
-    cmd_type_t type;
-
-    if (input == NULL || req == NULL) {
-        return -1;
-    }
-
-    /*
-     * %63s       -> read most 63 not-blink characters to cmd
-     * %4095[^\n] -> read all characters until '\n' to arg
-     */
-    if (sscanf(input, "%63s %4095[^\n]", cmd, arg) < 1) {
-        return -1;
-    }
-
-    type = str_to_cmd_type(cmd);
-    if (type == CMD_INVALID) {
-        return -1;
-    }
-
-    return fill_request(type, arg, req);
-}
-
-/*
- * this is shallow decoration version of parse_command_request 
- * for future use
- */
-int build_command_request(const char *input, command_request_t *req) {
-    return parse_command_request(input, req);
-}
-
-void print_text_from_packet(const packet_t *packet) {
-    char payload[MAX_PACKET_PAYLOAD];
-    size_t len;
-
-    if (packet->payload != NULL && packet->header.data_len > 0U) {
-        len = packet->header.data_len;
-        if (len >= sizeof(payload)) {
-            len = sizeof(payload) - 1;
-        }
-        memcpy(payload, packet->payload, len);
-        payload[len] = '\0';
-        printf("%s\n", payload);
-    }
-}
-
-int get_text_from_packet(const packet_t* packet, char* text, int size)
+bool session_id_is_empty(const session_id_t *session_id)
 {
-    if (packet->payload != NULL && packet->header.data_len > 0U && packet->header.data_len < (unsigned int)size) {
-        memcpy(text, packet->payload, packet->header.data_len);
-        text[packet->header.data_len] = '\0';
-        return 0;
-    }
-    return -1;
+    static const session_id_t empty = {{0}};
+    return session_id == NULL || session_id_equal(session_id, &empty);
 }
 
-int send_puts_resume(int client_fd, uint64_t offset)
+bool session_id_equal(const session_id_t *left, const session_id_t *right)
+{
+    return left != NULL && right != NULL &&
+           memcmp(left->bytes, right->bytes, SESSION_ID_SIZE) == 0;
+}
+
+
+int send_puts_resume(int client_fd,
+                     const session_id_t *session_id,
+                     uint64_t offset)
 {
     resume_payload_t resume;
+    packet_t packet;
 
     resume.offset = host_to_net_u64(offset);
-    return send_packet(client_fd, CMD_PUTS_RESP, STATUS_OK,
-                       &resume, sizeof(resume));
+    if (packet_init(&packet, CMD_PUTS_RESP, STATUS_OK, session_id,
+                    &resume, sizeof(resume)) != 0) {
+        return -1;
+    }
+    return protocol_send_packet(client_fd, &packet);
 }

@@ -2,6 +2,7 @@
 
 #include <limits.h>
 #include <linux/limits.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -15,15 +16,28 @@
 /*
  * TLV_MAGIC:
  * ensure data received from our own defined protocol
- * 0x544C5631 is ASCII code TLV1 
+ * 0x544C5632 is ASCII code TLV2
  */
-#define TLV_MAGIC 0x544C5631U
+#define TLV_MAGIC 0x544C5632U
 
 /*
  * TLV_VERSION:
  * for future updated client/server protocol compatibility 
  */
-#define TLV_VERSION 1U
+#define TLV_VERSION 2U
+
+#define SESSION_ID_SIZE 16U
+
+/*
+ * Wire format:
+ * magic      4 bytes
+ * version    4 bytes
+ * cmd_type   4 bytes
+ * status     4 bytes
+ * data_len   4 bytes
+ * session_id 16 bytes
+ */
+#define TLV_WIRE_HEADER_SIZE (20U + SESSION_ID_SIZE)
 
 /*
  * MAX_PACKET_PAYLOAD:
@@ -38,29 +52,10 @@
 #define MAX_COMMAND_INPUT 512U
 
 /*
- * MAX_COMMAND_ARG:
- * max length that command args have
- */
-#define MAX_COMMAND_ARG PATH_MAX
-
-/*
- * MAX_TEXT_PAYLOAD:
- * max length text responded
- */
-#define MAX_TEXT_PAYLOAD 4096U
-
-/*
  * FILE_CHUNK_SIZE:
  * the number of bytes that each FILE_DATA packet
  */
 #define FILE_CHUNK_SIZE 4096U
-
-/**
- * FILE_OPTIMIZATION_THRESHOLD
- *
- * the large file transfer optimization threshold
- */
-#define FILE_OPTIMIZATION_THRESHOLD 1024 * 1024 * 100   // 1M * 100 = 100M
 
 typedef enum {
     CMD_INVALID = 0,        // invalid command
@@ -106,59 +101,27 @@ typedef enum {
     STATUS_FILE_NOTEXIST,        // rm, file not exist
 
     STATUS_DB_ERROR,
+    STATUS_UNAUTHORIZED,
 } status_code_t;
 
-/*
- * tlv_header_t:
- *
- * - Type   -> cmd_type
- * - Length -> data_len
- * - Value  -> payload
- *
- */
-typedef struct {
-    uint32_t magic;    
-    uint32_t version;  
-    uint32_t cmd_type; 
-    uint32_t status;   
-    uint32_t data_len; // payload length
-} tlv_header_t;
+
 
 typedef struct {
-    tlv_header_t header; 
-    void *payload; // malloc, if len = 0, payload == NULL
+    unsigned char bytes[SESSION_ID_SIZE];
+} session_id_t;
+
+typedef struct {
+    cmd_type_t type;
+    status_code_t status;
+    uint32_t payload_len;
+    session_id_t session_id;
+} packet_header_t;
+
+typedef struct {
+    packet_header_t header;
+    void *payload;
+    bool owns_payload; /* true if packet_t is responsible for freeing payload */
 } packet_t;
-
-/*
- * command_request_t:
- * command line parsed result
- *
- * @example
- * mkdir demo 
- * will be parsed as follows:
- *   type = CMD_MKDIR
- *   arg  = "demo"
- */
-typedef struct {
-    cmd_type_t type; 
-    char arg[MAX_COMMAND_ARG];   
-} command_request_t;
-
-/*
- * path payload
- */
-typedef struct {
-    char path[PATH_MAX]; 
-} path_payload_t;
-
-/*
- * text_payload_t:
- *
- * for ls/pwd/mkdir/... simple command
- */
-typedef struct {
-    char text[MAX_TEXT_PAYLOAD];
-} text_payload_t;
 
 /*
  * file_info_payload_t:
@@ -171,6 +134,12 @@ typedef struct {
     char sha256_hex[65];
 } file_info_payload_t;
 
+typedef struct {
+    char remote_path[PATH_MAX];
+    uint64_t file_size;
+    char sha256_hex[65];
+} upload_request_payload_t;
+
 /*
  * resume_payload_t:
  */
@@ -178,39 +147,13 @@ typedef struct {
     uint64_t offset;
 } resume_payload_t;
 
-/*
- * file_chunk_payload_t:
- */
-typedef struct {
-    uint32_t data_len;
-    unsigned char data[FILE_CHUNK_SIZE];
-} file_chunk_payload_t;
-
 /* Interface */
-
-/*
- * str_to_cmd_type
- * parse string to cmd_type_t
- */
-cmd_type_t str_to_cmd_type(const char *cmd);
 
 /*
  * cmd_type_to_str
  * parse cmd_type_t to string
  */
 const char* cmd_type_to_str(cmd_type_t type);
-
-/*
- * parse_command_request:
- * parse client input to command_request_t variable
- *
- */
-int parse_command_request(const char *input, command_request_t *req);
-
-/*
- * build_command_request:
- */
-int build_command_request(const char *input, command_request_t *req);
 
 /*
  * host_to_net_u64 / net_to_host_u64:
@@ -225,25 +168,22 @@ uint64_t net_to_host_u64(uint64_t value);
 int send_n(int fd, const void *buf, size_t len);
 int recv_n(int fd, void *buf, size_t len);
 
-int send_packet(int fd, cmd_type_t type, status_code_t status, const void *payload, uint32_t payload_len);
+int packet_init(packet_t *packet,
+                cmd_type_t type,
+                status_code_t status,
+                const session_id_t *session_id,
+                const void *payload,
+                uint32_t payload_len);
 
-// for sendfile use
-int send_packet_header(int fd, cmd_type_t type, status_code_t status, uint32_t payload_len);
+int protocol_send_packet(int fd, const packet_t *packet);
+int protocol_recv_packet(int fd, packet_t *packet);
+/* Send only a frame header before a zero-copy payload such as sendfile(). */
+int protocol_send_header(int fd, const packet_header_t *header);
+void packet_release(packet_t *packet);
 
-int recv_packet(int fd, packet_t *packet);
+bool session_id_is_empty(const session_id_t *session_id);
+bool session_id_equal(const session_id_t *left, const session_id_t *right);
 
-/*
- * free_packet:
- * free memory that malloced by recv_packet
- */
-void free_packet(packet_t *packet);
-
-/*
- * print_text_from_packet:
- * print packet payload as text when the packet contains a text response.
- */
-void print_text_from_packet(const packet_t *packet);
-
-int get_text_from_packet(const packet_t* packet, char* text, int size);
-
-int send_puts_resume(int client_fd, uint64_t offset);
+int send_puts_resume(int client_fd,
+                     const session_id_t *session_id,
+                     uint64_t offset);

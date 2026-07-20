@@ -35,9 +35,6 @@
  * shut down from normal process context instead of doing cleanup in a signal
  * handler.
  */
-
-
-// TODO: ^Cdouble free or corruption (!prev)
 static int pipe_fd[2];
 
 /*
@@ -55,12 +52,15 @@ int main(int argc, char* argv[]){
     char project_dir[PATH_MAX];     // project root dir, client-drive-demo
     char config_path[PATH_MAX];     // config file absolute path 
     char log_file[PATH_MAX];        // log file absolute path 
-    int listen_fd;
-    int epoll_fd;
-    thread_pool_t* thread_pool;
-    database_pool_t* db_pool;
     char storage_root[PATH_MAX];    // server storage root
     char transfer_temp_dir[PATH_MAX]; // temp file path
+
+    int listen_fd;
+    int epoll_fd;
+
+    thread_pool_t* thread_pool;
+    database_pool_t* db_pool;
+    session_table_t* session_table;
 
     /* Print a beautiful banner and the current time */
     tui_print_banner();
@@ -73,10 +73,7 @@ int main(int argc, char* argv[]){
         return -1; 
     }
 
-    /**
-     * Handle command line args.
-     * If the user does not choose a config file, use the default config.
-     */
+     // If the user does not choose a config file, use the default config.
     if (argc > 2) {
         fprintf(stderr, "usage: %s [config-file]\n", argv[0]);
         return 1;
@@ -158,7 +155,7 @@ int main(int argc, char* argv[]){
     }
 
     // Initialize client session table
-    if (session_table_init() != 0) {
+    if ((session_table = session_table_create()) == NULL) {
         LOG_ERROR("Failed to initialize session table");
         thread_pool_destroy(thread_pool);
         database_pool_destroy(db_pool);
@@ -169,8 +166,8 @@ int main(int argc, char* argv[]){
     // Create the self-pipe used to wake epoll on SIGINT.
     if (pipe(pipe_fd) != 0) {
         perror("pipe");
-        session_table_destroy();
         thread_pool_destroy(thread_pool);
+        session_table_destroy(session_table);
         database_pool_destroy(db_pool);
         log_close();
         return -1;
@@ -181,8 +178,8 @@ int main(int argc, char* argv[]){
     if (listen_fd < 0) {
         close(pipe_fd[0]);
         close(pipe_fd[1]);
-        session_table_destroy();
         thread_pool_destroy(thread_pool);
+        session_table_destroy(session_table);
         database_pool_destroy(db_pool);
         log_close();
         return -1;
@@ -211,8 +208,8 @@ int main(int argc, char* argv[]){
             close(pipe_fd[0]);
             close(pipe_fd[1]);
             close(epoll_fd);
-            session_table_destroy();
             thread_pool_destroy(thread_pool);
+            session_table_destroy(session_table);
             database_pool_destroy(db_pool);
             log_close();
             return -1;
@@ -235,8 +232,8 @@ int main(int argc, char* argv[]){
                 close(pipe_fd[0]);
                 close(pipe_fd[1]);
                 close(epoll_fd);
-                session_table_destroy();
                 thread_pool_destroy(thread_pool);
+                session_table_destroy(session_table);
                 database_pool_destroy(db_pool);
                 LOG_INFO("server closed");
                 log_close();
@@ -254,7 +251,9 @@ int main(int argc, char* argv[]){
                  * For client fds, either a packet is ready to read or the
                  * connection state changed.
                  */
-                handle_client_event(epoll_fd, ready_fd, events[i].events, thread_pool, db_pool, storage_root, transfer_temp_dir);
+                handle_client_event(epoll_fd, ready_fd, events[i].events,
+                                    thread_pool, db_pool, session_table,
+                                    storage_root, transfer_temp_dir);
             }
         }
     }
@@ -263,11 +262,10 @@ int main(int argc, char* argv[]){
     close(pipe_fd[0]);
     close(pipe_fd[1]);
     close(epoll_fd);
-    session_table_destroy();
     thread_pool_destroy(thread_pool);
+    session_table_destroy(session_table);
     database_pool_destroy(db_pool);
     LOG_INFO("server closed");
     log_close();
     return 0;
 }
-

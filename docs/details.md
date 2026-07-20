@@ -420,6 +420,67 @@ sessions[client_fd] = NULL;
 
 This is important because operating systems commonly reuse low-numbered file descriptors. If the table entry is not cleared, a later connection may receive the same fd and `session_create` will incorrectly think a session already exists.
 
+
+## Phase 4
+
+在上述模式中，可能会出现以下情况： **线程 A** 刚处理完用户 A（张三）的文件上传任务，为了保持高效运转，该线程会立即从任务队列中获取新任务。此时，它极有可能获取到用户 B（李四）的文件上传任务。
+
+从业务逻辑上看，我们必须确保文件被准确上传到各自用户的私有目录下。虽然可以通过要求客户端在传输前声明“云端存储路径”来解决物理位置问题，但关键在于：**服务端如何可靠地识别当前请求所属的用户身份？**（这种情况很常见：张三要求上传到自己的云端/code目录，李四也要求上传到自己的云端/code目录）
+
+例如：用户 A 和用户 B 都请求将文件上传到各自云端的 `/code` 目录。如果仅凭路径判断，服务端将无法区分该请求应归属于谁。因此，客户端的子线程在提交路径的同时，必须向服务端提供**身份凭证**，以证明“当前正在为哪个用户提供服务”。
+
+针对该问题，有以下四种解决方案：
+
+**方案一：明文账号标识**
+
+- **做法：** 客户端子线程在请求中携带用户账号（如用户名）。
+- **缺点：** 安全性极低。用户名属于非敏感公开信息，极易被伪造或拦截，无法起到真正的校验作用。
+
+方案二：重复登录校验
+
+- **做法：** 客户端主线程登录一次，每当子线程需要传输文件时，再次携带账号和密码进行重复登录。
+- **缺点：** 性能损耗大。频繁的登录验证会增加服务器负担，且在网络中多次传输密码增加了泄露风险。
+
+**方案三：Session（会话）机制**
+
+- **做法：** 用户通过主线程登录后，服务器生成一个包含 `SessionID` 和用户信息（Key-Value 结构）的会话记录，并将其存储在内存中。随后将 `SessionID` 返回给客户端。客户端子线程在后续请求中携带该 ID，服务端通过比对内存数据来识别用户。
+- **缺点：** 1.  **资源占用：** 服务器需在内存中维护大量会话数据。 2.  **扩展性差：** 不利于分布式集群部署。若请求分发到不同服务器，需实现 Session 共享机制（如引入 Redis），增加了系统复杂度。
+
+**方案四：Token（令牌）机制**
+
+- **做法：** 类似于 Session，但 Token 是通过加密算法（如 JWT）基于用户信息生成的字符串。服务端在登录成功后下发 Token，客户端后续请求均携带此令牌。服务端通过解密（校验签名）即可解析出用户信息。
+- **优点：** **无状态化**。服务器无需在内存中存储 Token 信息，信息已集成在 Token 自身中，天然支持分布式架构。
+
+#### 2.2、JWT的使用
+
+JWT (= token :  是一种标准)
+
+JWT/JSON Web Token:  JWT是一种**开放标准**, 具有在两个实体之间进行数据传输以及验证信息的重要作用，可以让信息在网络上更安全地传递。
+
+JWT的结构通常包含三个部分：头部（Header）、载荷（Payload）、签名（Signature）。
+
+- 头部：包含令牌的类型和所使用的签名算法。
+- 载荷：包含要传递的声明, 例如用户ID、令牌的发行者和过期时间等。
+- 签名：用于验证消息在传输过程中没有被篡改。
+
+```C++
+// 一个jwt的token的结构大概是: 头部.荷载.签名
+Eg:
+eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjIxNDc0ODM2NDcsInN1YiI6InByb2plY3QgbmFtZSIsImlzcyI6InNub3ciLCJhdWQiOiJ1c2VyIn0.01lC775YBUPYRvhhBis_KKEh6JMwimEll9YLLFwZkWYGym8zeRkmamNpr5g8q7WlygyR3FCbUn91I0y-RR4IDQ 
+
+eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJleHAiOjIxNDc0ODM2NDcsInN1YiI6InByb2plY3QgbmFtZSIsImlzcyI6InNub3dfbGVlIiwiYXVkIjoidXNlciJ9.VnEv9-lo8jRw59-CyFLj19MIIWTwhwdrdeohOx7UH5Ms5akTkNg7whS0EdbL5s0COh3tlo1jaZp5XBNm12mRMQ 
+```
+
+JWT的荷载字段设置:
+
+- iss (issuer)：签发人
+- sub (subject)：主题
+- aud (audience)：受众
+- iat (Issued At)：签发时间
+- exp (expiration time)：过期时间
+- ...
+
+
 ## Related Documents
 
 - `docs/overview.md`: phase-level feature requirements.

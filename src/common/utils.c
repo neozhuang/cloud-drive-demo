@@ -207,14 +207,26 @@ int utils_get_base_name(const char* path, char* base_name, int len)
 {
     char temp[PATH_MAX] = {0};
     char* base;
+    size_t path_len;
+    size_t base_len;
 
-    memcpy(temp, path, strlen(path));
-    base = basename(temp);
-    if (base == NULL || (int)strlen(base) >= len) {
+    if (path == NULL || base_name == NULL || len <= 0) {
         return -1;
     }
-    memcpy(base_name, base, len - 1);
-    base_name[len - 1] = '\0';
+    path_len = strnlen(path, sizeof(temp));
+    if (path_len == 0 || path_len == sizeof(temp)) {
+        return -1;
+    }
+    memcpy(temp, path, path_len + 1U);
+    base = basename(temp);
+    if (base == NULL) {
+        return -1;
+    }
+    base_len = strlen(base);
+    if (base_len == 0 || base_len >= (size_t)len) {
+        return -1;
+    }
+    memcpy(base_name, base, base_len + 1U);
 
     return 0;
 }
@@ -483,4 +495,3 @@ int write_n(int fd, const void *buf, size_t len)
 
     return 0;
 }
-

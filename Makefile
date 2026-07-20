@@ -26,10 +26,12 @@ SERVER_SRCS := \
 CLIENT_SRCS := \
 	src/client/main.c \
 	src/client/config.c \
-	src/client/network.c \
 	src/client/user_auth.c \
-	src/client/handler.c \
-	src/client/menu.c
+	src/client/menu.c \
+	src/client/runtime.c \
+	src/client/connection.c \
+	src/client/command.c \
+	src/client/transfer.c
 
 THIRD_PARTY_SRCS := \
 	third_party/inih/ini.c
@@ -39,14 +41,36 @@ COMMON_OBJS := $(patsubst src/%.c,build/%.o,$(COMMON_SRCS))
 SERVER_OBJS := $(patsubst src/%.c,build/%.o,$(SERVER_SRCS))
 CLIENT_OBJS := $(patsubst src/%.c,build/%.o,$(CLIENT_SRCS))
 THIRD_PARTY_OBJS := $(patsubst third_party/%.c,build/third_party/%.o,$(THIRD_PARTY_SRCS))
+DEPS := $(COMMON_OBJS:.o=.d) $(SERVER_OBJS:.o=.d) $(CLIENT_OBJS:.o=.d) $(THIRD_PARTY_OBJS:.o=.d)
 
-.PHONY: all server client clean rebuild bear
+.PHONY: all server client protocol-test session-test client-runtime-test clean rebuild bear
 
 all: server client
 
 server: bin/server-cdd
 
 client: bin/client-cdd
+
+protocol-test: build/tests/protocol_session_test
+	./build/tests/protocol_session_test
+
+session-test: build/tests/session_test
+	./build/tests/session_test
+
+client-runtime-test: build/tests/client_runtime_test
+	./build/tests/client_runtime_test
+
+build/tests/protocol_session_test: tests/protocol_session_test.c src/common/protocol.c include/common/protocol.h
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
+build/tests/session_test: tests/session_test.c src/server/session.c src/common/protocol.c include/server/session.h include/common/protocol.h
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(filter %.c,$^) -o $@
+
+build/tests/client_runtime_test: tests/client_runtime_test.c src/client/runtime.c src/client/transfer.c src/client/connection.c src/common/protocol.c src/common/utils.c src/common/log.c
+	mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $^ -o $@ -lcrypto
 
 bin/server-cdd: $(COMMON_OBJS) $(THIRD_PARTY_OBJS) $(SERVER_OBJS)
 	mkdir -p bin
@@ -58,11 +82,13 @@ bin/client-cdd: $(COMMON_OBJS) $(THIRD_PARTY_OBJS) $(CLIENT_OBJS)
 
 build/%.o: src/%.c
 	mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 build/third_party/%.o: third_party/%.c
 	mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
+-include $(DEPS)
 
 clean:
 	rm -rf build

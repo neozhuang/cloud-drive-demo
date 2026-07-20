@@ -61,17 +61,17 @@ void handle_client_event(int epoll_fd, int client_fd, uint32_t events, thread_po
 
         task->client_fd = client_fd;
 
-        if (recv_packet(client_fd, &task->packet) != 0) {
+        if (protocol_recv_packet(client_fd, &task->packet) != 0) {
             free(task);
             close_client(epoll_fd, client_fd);
             return;
         }
 
         // handle puts and gets request
-        if (task->packet.header.cmd_type == CMD_PUTS_REQ || task->packet.header.cmd_type == CMD_GETS_REQ) {
+        if (task->packet.header.type == CMD_PUTS_REQ || task->packet.header.type == CMD_GETS_REQ) {
             transfer_task_t *transfer_task = malloc(sizeof(transfer_task_t));
             if (transfer_task == NULL) {
-                free_packet(&task->packet);
+                packet_release(&task->packet);
                 free(task);
                 close_client(epoll_fd, client_fd);
                 return;
@@ -80,7 +80,7 @@ void handle_client_event(int epoll_fd, int client_fd, uint32_t events, thread_po
             transfer_task->epoll_fd = epoll_fd;
             transfer_task->client_fd = task->client_fd;
             transfer_task->packet = task->packet;
-            // Caution: cannot free_packet due to tranfer_task now take over packet instead of task.:w
+            // Caution: cannot packet_release due to tranfer_task now take over packet instead of task.:w
             free(task); 
 
             // Delete the client_fd from the epoll listen queue temporarily 
@@ -89,7 +89,7 @@ void handle_client_event(int epoll_fd, int client_fd, uint32_t events, thread_po
 
             // Handle the puts and gets task
             if (thread_pool_add(thread_pool, handle_transfer_task, transfer_task) != 0) {
-                free_packet(&transfer_task->packet);
+                packet_release(&transfer_task->packet);
                 free(transfer_task);
                 close_client(epoll_fd, client_fd);
                 LOG_ERROR("Failed to add gets/puts packet task");
@@ -99,7 +99,7 @@ void handle_client_event(int epoll_fd, int client_fd, uint32_t events, thread_po
 
         // Handle common task: pwd, cd, ls, rmdir, mkdir, rm, ...
         if (thread_pool_add(thread_pool, handle_basic_task, task) != 0) {
-            free_packet(&task->packet);
+            packet_release(&task->packet);
             free(task);
             close_client(epoll_fd, client_fd);
             LOG_ERROR("Failed to add common packet task");

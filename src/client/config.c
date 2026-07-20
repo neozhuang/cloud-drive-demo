@@ -1,58 +1,114 @@
 #include "client/config.h"
 
+#include <errno.h>
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "inih/ini.h"
 
-static int handler(void* user, const char* section, const char* name,
-                   const char* value)
+static int copy_string(char *destination, size_t destination_size,
+                       const char *value)
 {
-    client_config_t* pconfig = (client_config_t*)user;
+    size_t length;
 
-    #define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
-    if (MATCH("remote", "host")) {
-        strncpy(pconfig->remote.host, value, strlen(value));
-        pconfig->remote.host[strlen(value)] = '\0';
-    } else if (MATCH("remote", "port")) {
-        strncpy(pconfig->remote.port, value, strlen(value));
-        pconfig->remote.port[strlen(value)] = '\0';
-    } else if (MATCH("log", "log_level")) {
-        strncpy(pconfig->log.log_level, value, strlen(value));
-        pconfig->log.log_level[strlen(value)] = '\0';
-    } else if (MATCH("log", "log_file")) {
-        strncpy(pconfig->log.log_file, value, strlen(value));
-        pconfig->log.log_file[strlen(value)] = '\0';
-    } else if (MATCH("storage", "download_dir")) {
-        strncpy(pconfig->storage.download_dir, value, strlen(value));
-        pconfig->storage.download_dir[strlen(value)] = '\0';
-    } else {
-        return 0;  /* unknown section/name, error */
-    }
-    return 1;
-}
-
-int client_config_load(client_config_t *config, const char *filename)
-{
-    if (ini_parse(filename, handler, config) < 0) {
-        printf("Cannot load %s\n", filename);
+    if (destination == NULL || destination_size == 0 || value == NULL) {
         return -1;
     }
+
+    length = strlen(value);
+    if (length >= destination_size) {
+        return -1;
+    }
+
+    memcpy(destination, value, length + 1);
     return 0;
 }
 
-void client_config_print(const client_config_t *config)
+static int parse_positive_int(const char *value, int *result)
 {
-    printf("[remote]\n");
-    printf("host = %s\n", config->remote.host);
-    printf("port = %s\n", config->remote.port);
+    char *end = NULL;
+    long parsed;
 
-    printf("\n[log]\n");
-    printf("log_level = %s\n", config->log.log_level);
-    printf("log_file = %s\n", config->log.log_file);
+    if (value == NULL || result == NULL || value[0] == '\0') {
+        return -1;
+    }
 
-    printf("\n[storage]\n");
-    printf("download_dir = %s\n", config->storage.download_dir);
+    errno = 0;
+    parsed = strtol(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' ||
+        parsed <= 0 || parsed > INT_MAX) {
+        return -1;
+    }
 
-    printf("\n");
+    *result = (int)parsed;
+    return 0;
+}
+
+static int config_handler(void *user, const char *section, const char *name,
+                          const char *value)
+{
+    client_config_t *config = user;
+
+#define MATCH(s, n) (strcmp(section, (s)) == 0 && strcmp(name, (n)) == 0)
+    if (MATCH("remote", "host")) {
+        return copy_string(config->remote.host, sizeof(config->remote.host),
+                           value) == 0;
+    }
+    if (MATCH("remote", "port")) {
+        return copy_string(config->remote.port, sizeof(config->remote.port),
+                           value) == 0;
+    }
+    if (MATCH("log", "log_level")) {
+        return copy_string(config->log.log_level,
+                           sizeof(config->log.log_level), value) == 0;
+    }
+    if (MATCH("log", "log_file")) {
+        return copy_string(config->log.log_file, sizeof(config->log.log_file),
+                           value) == 0;
+    }
+    if (MATCH("storage", "download_dir")) {
+        return copy_string(config->storage.download_dir,
+                           sizeof(config->storage.download_dir), value) == 0;
+    }
+    if (MATCH("transfer", "max_concurrent")) {
+        return parse_positive_int(value,
+                                  &config->transfer.max_concurrent) == 0;
+    }
+    if (MATCH("transfer", "connect_timeout_ms")) {
+        return parse_positive_int(value,
+                                  &config->transfer.connect_timeout_ms) == 0;
+    }
+    if (MATCH("transfer", "io_timeout_ms")) {
+        return parse_positive_int(value, &config->transfer.io_timeout_ms) == 0;
+    }
+#undef MATCH
+
+    return 0;
+}
+
+int client_config_load(client_config_t *config, const char *path)
+{
+    client_config_t parsed;
+    int result;
+
+    if (config == NULL || path == NULL || path[0] == '\0') {
+        return -1;
+    }
+
+    memset(&parsed, 0, sizeof(parsed));
+
+    result = ini_parse(path, config_handler, &parsed);
+    if (result != 0) {
+        fprintf(stderr, "Cannot parse %s", path);
+        if (result > 0) {
+            fprintf(stderr, " at line %d", result);
+        }
+        fputc('\n', stderr);
+        return -1;
+    }
+
+    *config = parsed;
+    return 0;
 }

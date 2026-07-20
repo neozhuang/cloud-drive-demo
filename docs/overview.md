@@ -174,3 +174,77 @@ The server must avoid exposing incomplete files as valid user files. Several des
 
 This state tracking is especially important when combined with resumable upload and instant upload logic.
 
+## Phase 4: Session Management And Connection Lifecycle
+
+The fourth phase improves concurrency and resource management. It separates fast interactive commands from long-running transfers and disconnects control connections that remain idle beyond a configured timeout.
+
+These features must work together. An upload or download must not block commands such as `pwd` or `ls`, and an active transfer must not be mistaken for an idle client and forcibly closed.
+
+### Separation Of Short And Long Commands
+
+Commands are divided according to how long they occupy a connection:
+
+- Short commands include authentication and metadata operations such as `pwd`, `cd`, `ls`, `mkdir`, `rmdir`, and `rm`. They use one persistent control connection and return quickly.
+- Long commands are `puts` and `gets`. Each transfer uses a separate TCP connection and runs in a background client worker.
+
+The main client thread remains available for user input while transfer workers perform file I/O. For example, a user can start a large download and continue browsing remote directories through the control connection.
+
+One logged-in client can therefore own multiple connections:
+
+```text
+client session
+|-- control connection: login and short commands
+|-- transfer connection: puts task A
+|-- transfer connection: gets task B
+`-- transfer connection: puts task C
+```
+
+Transfer concurrency should be limited by configuration so one client cannot create an unbounded number of sockets or worker threads.
+
+### SessionID
+
+A socket fd can no longer identify a user because one user may have several connections. After successful login, the server creates a random SessionID and returns it to the client. The client includes this SessionID in every authenticated request, including the first request on each transfer connection.
+
+Login and registration requests are anonymous and carry an empty SessionID. Every other request must carry a non-empty SessionID that exists in the session table. The server rejects an empty, unknown, or conflicting SessionID before dispatching the command.
+
+### Idle Connection Kick-Out
+
+The server should release inactive control connections so abandoned clients do not consume file descriptors and session resources indefinitely. The timeout should be configurable; 30 seconds is suitable for demonstration, while a production value would normally be longer.
+
+The timeout applies to an idle control connection, not to a transfer that is making progress. The server must follow these rules:
+
+- Update a control connection's last-activity time whenever a complete, valid request is received.
+- Update a transfer connection's activity while transfer packets or file bytes are being exchanged.
+- Never kick out a connection merely because a large file operation takes longer than the idle timeout.
+- Close an idle control fd by removing it from epoll, detaching it from the session table, and then closing the fd.
+- Keep a session alive while at least one transfer connection is still bound to it.
+- Delete the session and invalidate its SessionID only after its final bound connection closes.
+
+This connection-based lifecycle allows an ongoing download to finish even if the unused control connection is kicked out. It also avoids terminating the entire client process from the server side.
+
+### Timeout Detection
+
+The simplest implementation gives `epoll_wait()` a one-second timeout. Once per tick, the server scans all idle-managed connections and closes those whose last activity exceeds the configured limit. This is easy to implement but performs an O(n) scan every second.
+
+For larger connection counts, use a timing wheel:
+
+- Create a circular array with one bucket per second of the timeout window. A 30-second timeout uses at least 30 buckets.
+- Each bucket stores references to connections expected to expire at that time.
+- When a connection is accepted or becomes active, schedule it in the bucket for `current_tick + timeout`.
+- Store an activity generation or exact deadline with each entry. Rescheduling may leave an old entry in a bucket; the generation or deadline prevents that stale entry from closing an active connection.
+- Advance the wheel once per second, preferably using a `timerfd` registered with epoll rather than relying on wall-clock timeouts.
+- When processing a bucket, close only entries whose stored deadline still matches the connection and whose idle duration has actually reached the limit.
+
+Use a monotonic clock such as `CLOCK_MONOTONIC` for deadlines. Wall-clock changes must not make clients expire early or remain connected indefinitely.
+
+### Client Behavior After Kick-Out
+
+The minimum behavior is explicit recovery:
+
+- If the control connection has been closed, the next short command reports that the session connection expired.
+- The client keeps running instead of exiting abruptly.
+- Existing background transfers continue independently when their transfer connections remain valid.
+- The user can reconnect and log in again to obtain a new SessionID.
+
+Automatic reconnection is optional. If implemented, the client should reconnect and re-authenticate before retrying a short command. It must not blindly replay non-idempotent commands such as `mkdir`, `rm`, or `puts`, because the server may have completed the original request before the connection was lost.
+

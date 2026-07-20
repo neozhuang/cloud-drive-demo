@@ -61,12 +61,6 @@ void menu_show_help()
            "ls", "list remote files");
     printf(COLOR_BLUE "| " COLOR_YELLOW "%-14s" COLOR_RESET
            " %-31s" COLOR_BLUE "|\n" COLOR_RESET,
-           "ll", "list remote files in detail");
-    printf(COLOR_BLUE "| " COLOR_YELLOW "%-14s" COLOR_RESET
-           " %-31s" COLOR_BLUE "|\n" COLOR_RESET,
-           "tree", "show remote directory tree");
-    printf(COLOR_BLUE "| " COLOR_YELLOW "%-14s" COLOR_RESET
-           " %-31s" COLOR_BLUE "|\n" COLOR_RESET,
            "mkdir <dir>", "create remote directory");
     printf(COLOR_BLUE "| " COLOR_YELLOW "%-14s" COLOR_RESET
            " %-31s" COLOR_BLUE "|\n" COLOR_RESET,
@@ -76,13 +70,10 @@ void menu_show_help()
            "rm <file>", "remove remote file");
     printf(COLOR_BLUE "| " COLOR_YELLOW "%-14s" COLOR_RESET
            " %-31s" COLOR_BLUE "|\n" COLOR_RESET,
-           "cat <file>", "print remote file");
+           "puts <local>", "upload to remote cwd");
     printf(COLOR_BLUE "| " COLOR_YELLOW "%-14s" COLOR_RESET
            " %-31s" COLOR_BLUE "|\n" COLOR_RESET,
-           "puts <local>", "upload local file");
-    printf(COLOR_BLUE "| " COLOR_YELLOW "%-14s" COLOR_RESET
-           " %-31s" COLOR_BLUE "|\n" COLOR_RESET,
-           "gets <remote>", "download remote file");
+           "gets <remote>", "download in background");
     printf(COLOR_BLUE "+------------------------------------------------+\n");
     printf("| " COLOR_GREEN "%-14s" COLOR_RESET
            " %-31s" COLOR_BLUE "|\n" COLOR_RESET,
