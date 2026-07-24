@@ -11,6 +11,8 @@
 #include <fcntl.h>
 #include <crypt.h>
 #include <libgen.h>
+#include <sys/epoll.h>
+#include <sys/socket.h>
 
 #include "common/log.h"
 #include "common/protocol.h"
@@ -19,6 +21,8 @@
 #include "server/session.h"
 #include "server/dao_auth.h"
 #include "server/dao_basic.h"
+#include "server/network.h"
+#include "server/timer_wheel.h"
 
 
 /* Command handlers for one decoded client packet. */
@@ -30,6 +34,14 @@ static void handle_ls(packet_task_t* task);
 static void handle_mkdir(packet_task_t* task);
 static void handle_rmdir(packet_task_t* task);
 static void handle_rm(packet_task_t* task);
+
+static int publish_control_fd(int client_fd, void *context)
+{
+    int epoll_fd = *(int *)context;
+
+    return network_add_epoll_fd(epoll_fd, client_fd,
+                                EPOLLIN | EPOLLRDHUP);
+}
 
 static int send_response_with_session_id(packet_task_t *task,
                                          cmd_type_t type,
@@ -124,6 +136,17 @@ void handle_basic_task(void *arg)
 
     // Packet tasks are allocated by the network/thread-pool side for this call.
     packet_release(&task->packet);
+
+    /* The control fd was removed from epoll and the wheel while this task was
+     * running. Track it before re-adding epoll interest so an immediate event
+     * can always refresh or remove an existing timer entry. */
+    if (timer_wheel_track_and_publish(task->timer_wheel, task->client_fd,
+                                      publish_control_fd,
+                                      &task->epoll_fd) != 0) {
+        session_detach_fd(task->session_table, task->client_fd);
+        shutdown(task->client_fd, SHUT_RDWR);
+        close(task->client_fd);
+    }
     free(task);
 }
 

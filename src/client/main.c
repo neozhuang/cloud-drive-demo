@@ -53,6 +53,22 @@ static int load_paths_and_config(int argc, char **argv, client_config_t *config,
     return 0;
 }
 
+static int connect_control(client_runtime_t *runtime)
+{
+    client_runtime_disconnect_control(runtime);
+    runtime->control_fd = client_connection_open(
+        runtime->config.remote.host, runtime->config.remote.port,
+        runtime->config.transfer.connect_timeout_ms,
+        runtime->config.transfer.io_timeout_ms);
+    if (runtime->control_fd < 0) {
+        LOG_ERROR("Failed to connect server");
+        fprintf(stderr, "Unable to connect to the server.\n");
+        return -1;
+    }
+    LOG_INFO("Connected to remote server");
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     client_config_t config;
@@ -68,6 +84,7 @@ int main(int argc, char *argv[])
     int runtime_initialized = 0;
     int logging_initialized = 0;
     int exit_code = 1;
+    int should_exit = 0;
 
     memset(&runtime, 0, sizeof(runtime));
     runtime.control_fd = -1;
@@ -98,46 +115,63 @@ int main(int argc, char *argv[])
 
     signal(SIGPIPE, SIG_IGN);
 
-    runtime.control_fd = client_connection_open(
-        config.remote.host, config.remote.port,
-        config.transfer.connect_timeout_ms, config.transfer.io_timeout_ms);
-    if (runtime.control_fd < 0) {
-        LOG_ERROR("Failed to connect server");
+    if (connect_control(&runtime) != 0) {
         goto cleanup;
     }
-    LOG_INFO("Connected to remote server");
 
-    if (user_auth(&runtime) != AUTH_OK) {
-        // Only AUTH_EXIT
+    while (!should_exit) {
+        int auth_result = user_auth(&runtime);
+        int reconnect_required = 0;
+
+        if (auth_result == AUTH_CONNECTION_ERROR) {
+            fprintf(stderr, "Control connection expired, reconnecting...\n");
+            if (connect_control(&runtime) != 0) {
+                break;
+            }
+            continue;
+        }
+        if (auth_result == AUTH_EXIT) {
+            exit_code = 0;
+            break;
+        }
+
+        tui_clear_screen();
+        menu_show_help();
+
+        while (!should_exit && !reconnect_required) {
+            transfer_manager_drain_events(runtime.transfers);
+            if (client_runtime_session_snapshot(&runtime, &session_id,
+                                                 username, sizeof(username),
+                                                 cwd, sizeof(cwd)) != 0) {
+                reconnect_required = 1;
+                break;
+            }
+            printf("%s@cloud-drive:%s> ", username, cwd);
+            fflush(stdout);
+            if (s_gets(input, sizeof(input)) == NULL) {
+                should_exit = 1;
+                exit_code = 0;
+                break;
+            }
+            command_result = client_command_execute(&runtime, input);
+            if (command_result == CLIENT_COMMAND_EXIT) {
+                should_exit = 1;
+                exit_code = 0;
+            } else if (command_result == CLIENT_COMMAND_RECONNECT) {
+                fprintf(stderr,
+                        "Control connection expired, reconnecting...\n");
+                if (connect_control(&runtime) != 0) {
+                    should_exit = 1;
+                } else {
+                    reconnect_required = 1;
+                }
+            }
+        }
+    }
+
+    if (exit_code == 0) {
         printf("bye, have a good day!\n");
-        exit_code = 0;  // Normal exit
-        goto cleanup;
     }
-
-    tui_clear_screen();
-    menu_show_help();
-
-    while (1) {
-        transfer_manager_drain_events(runtime.transfers);
-        if (client_runtime_session_snapshot(&runtime, &session_id,
-                                            username, sizeof(username),
-                                            cwd, sizeof(cwd)) != 0) {
-            LOG_ERROR("Session is no longer available");
-            break;
-        }
-        printf("%s@cloud-drive:%s> ", username, cwd);
-        fflush(stdout);
-        if (s_gets(input, sizeof(input)) == NULL) {
-            break;
-        }
-        command_result = client_command_execute(&runtime, input);
-        if (command_result == CLIENT_COMMAND_EXIT) {
-            break;
-        }
-    }
-
-    printf("bye, have a good day!\n");
-    exit_code = 0;
 
 cleanup:
     if (runtime_initialized) {

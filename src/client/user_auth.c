@@ -4,8 +4,14 @@
 #include <string.h>
 
 #include "client/menu.h"
+#include "client/connection.h"
 #include "common/protocol.h"
 #include "common/utils.h"
+
+enum {
+    AUTH_REQUEST_FAILED = -1,
+    AUTH_REQUEST_CONNECTION_ERROR = -2
+};
 
 static int exchange_auth(client_runtime_t *runtime, cmd_type_t type,
                          const char *payload, packet_t *response)
@@ -37,19 +43,35 @@ int user_auth(client_runtime_t *runtime)
 {
     while (1) {
         switch (menu_show_auth()) {
-            case 1:
-                if (user_login(runtime) == 0) {
+            case 1: {
+                if (!client_connection_is_alive(runtime->control_fd)) {
+                    return AUTH_CONNECTION_ERROR;
+                }
+                int result = user_login(runtime);
+                if (result == 0) {
                     return AUTH_OK;
+                }
+                if (result == AUTH_REQUEST_CONNECTION_ERROR) {
+                    return AUTH_CONNECTION_ERROR;
                 }
                 printf("Login failed, please try again\n");
                 break;
-            case 2:
-                if (user_register(runtime) == 0) {
+            }
+            case 2: {
+                if (!client_connection_is_alive(runtime->control_fd)) {
+                    return AUTH_CONNECTION_ERROR;
+                }
+                int result = user_register(runtime);
+                if (result == 0) {
                     printf("Register success, please login\n");
                 } else {
+                    if (result == AUTH_REQUEST_CONNECTION_ERROR) {
+                        return AUTH_CONNECTION_ERROR;
+                    }
                     printf("Register failed\n");
                 }
                 break;
+            }
             case 0:
                 return AUTH_EXIT;
             default:
@@ -65,7 +87,7 @@ int user_login(client_runtime_t *runtime)
     char password[32];
     char payload[128];
     packet_t response = {0};
-    int result = -1;
+    int result = AUTH_REQUEST_FAILED;
 
     memset(password, 0, sizeof(password));
     client_runtime_clear_session(runtime);
@@ -76,6 +98,7 @@ int user_login(client_runtime_t *runtime)
 
     snprintf(payload, sizeof(payload), "%s\n%s", username, password);
     if (exchange_auth(runtime, CMD_LOGIN_REQ, payload, &response) != 0) {
+        result = AUTH_REQUEST_CONNECTION_ERROR;
         goto out;
     }
 
@@ -106,7 +129,7 @@ int user_register(client_runtime_t *runtime)
     char confirm_password[32];
     char payload[128];
     packet_t response = {0};
-    int result = -1;
+    int result = AUTH_REQUEST_FAILED;
 
     memset(password, 0, sizeof(password));
     memset(confirm_password, 0, sizeof(confirm_password));
@@ -132,6 +155,7 @@ int user_register(client_runtime_t *runtime)
 
     snprintf(payload, sizeof(payload), "%s\n%s", username, password);
     if (exchange_auth(runtime, CMD_REGISTER_REQ, payload, &response) != 0) {
+        result = AUTH_REQUEST_CONNECTION_ERROR;
         goto out;
     }
     if (response.header.type == CMD_ACK &&

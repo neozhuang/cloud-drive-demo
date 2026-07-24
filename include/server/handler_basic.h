@@ -3,12 +3,15 @@
 #include "common/protocol.h"
 #include "server/database_pool.h"
 #include "server/session.h"
+#include "server/timer_wheel.h"
 
 typedef struct {
     int client_fd;
+    int epoll_fd;
     packet_t packet;
     database_pool_t* db_pool;
     session_table_t *session_table;
+    timer_wheel_t *timer_wheel;
     session_context_t session;
     char storage_root[PATH_MAX];    // absolute path: project_dir + config.storage.root_dir;
 } packet_task_t;

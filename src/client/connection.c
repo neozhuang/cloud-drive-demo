@@ -142,6 +142,30 @@ int client_connection_open(const char *host,
     return fd;
 }
 
+int client_connection_is_alive(int fd)
+{
+    char byte;
+
+    if (fd < 0) {
+        return 0;
+    }
+    for (;;) {
+        ssize_t received = recv(fd, &byte, sizeof(byte),
+                                MSG_PEEK | MSG_DONTWAIT);
+
+        if (received > 0) {
+            return 1;
+        }
+        if (received == 0) {
+            return 0;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        return errno == EAGAIN || errno == EWOULDBLOCK;
+    }
+}
+
 void client_connection_close(int fd)
 {
     if (fd < 0) {

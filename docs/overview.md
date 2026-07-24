@@ -1,250 +1,203 @@
 # Cloud Drive Demo Overview
 
-Cloud Drive Demo is a client-server file management system that provides a command-line interface for remote file operations. The project is designed to demonstrate the core capabilities of a cloud drive: connecting to a remote storage service, browsing directories, managing files, uploading and downloading data, recording server activity, and supporting reliable large-file transfer.
-
-## What This Project Can Do
-
-The client connects to the server and lets users operate on remote files through simple shell-like commands. The server receives each request, executes the corresponding file operation, and returns the result to the client.
-
-Planned capabilities include:
-
-- Remote directory navigation with commands such as `pwd`, `cd`, and `ls`.
-- Remote directory and file management with commands such as `mkdir`, `rmdir`, and `rm`.
-- File upload from client to server with `puts`.
-- File download from server to client with `gets`.
-- Multi-client handling through server-side worker threads.
-- Server-side operation logging for connections, requests, and file changes.
-- Runtime configuration for network settings, logging behavior, and transfer thresholds.
-- Resumable upload and download when a transfer is interrupted.
-- Optimized large-file transfer using platform-level mechanisms such as `mmap` and `sendfile`.
-
-## Phase 1: Basic Cloud Drive Framework
-
-The first phase focuses on building the core client-server workflow and implementing basic remote file commands.
-
-### Client Features
-
-The client is responsible for user interaction and request delivery. It will:
-
-- Establish a connection with the server.
-- Read commands from standard input.
-- Parse each command into a command type and arguments.
-- Validate command syntax before sending requests.
-- Reject invalid input locally when possible.
-- Send valid requests to the server.
-- Display server responses to the user.
-
-Supported commands in this phase include:
-
-- `pwd`: show the current remote directory.
-- `cd`: change the current remote directory.
-- `ls`: list files in the current remote directory.
-- `mkdir`: create a remote directory.
-- `rmdir`: remove a remote directory.
-- `rm`: remove a remote file.
-- `puts`: upload a local file to the server.
-- `gets`: download a remote file from the server.
-
-### Server Features
-
-The server is responsible for connection management, request handling, and file-system operations. It will:
-
-- Start a listening service on a configured IP address and port.
-- Accept client connection requests.
-- Assign accepted client connections to worker threads.
-- Receive parsed commands from clients.
-- Execute the corresponding file operation.
-- Return success, failure, or data responses to the client.
-
-### Server Logging
-
-The server will record important runtime activity, including:
-
-- Client connection and disconnection time.
-- Client request details.
-- File operation records, such as upload, download, remove, and directory changes.
-- Error information for failed requests or abnormal connections.
-
-These logs help with debugging during development and provide operational visibility when the server is running.
-
-### Configuration Files
-
-The project will use configuration files to avoid hard-coding environment-specific values. Configuration can include:
-
-- Server IP address.
-- Server port.
-- Database credentials, if database support is added.
-- Log level.
-- Large-file transfer threshold.
-
-Configuration files make it possible to run the same code in different environments, such as local development, testing, and production. Sensitive configuration files can be excluded from version control when needed.
-
-### Configurable Logging
-
-The logging system should support multiple log levels, such as `DEBUG`, `INFO`, `WARN`, and `ERROR`.
-
-During development, lower log levels such as `DEBUG` or `INFO` are useful because they provide detailed execution traces. In production, higher log levels such as `WARN` or `ERROR` are preferred because they reduce unnecessary output and avoid wasting server resources.
-
-At startup, the program reads the configured log level and uses it to decide which messages should be printed. For example, if the configured level is `ERROR`, lower-priority messages such as `DEBUG` and `INFO` should be ignored.
-
-## Phase 2: Reliable And Optimized Transfers
-
-The second phase focuses on improving file-transfer reliability and performance, especially for large files or unstable network connections.
-
-### Resumable Transfer
-
-Upload and download operations should support resume behavior after interruption.
-
-For downloads, if a client is downloading a 215 MB file and the connection stops after 16 MB, the next `gets` request should continue from the 16 MB position instead of starting again from the beginning.
-
-For uploads, if a client is uploading a 215 MB file and the connection stops after 16 MB, the next `puts` request should continue from the uploaded 16 MB position instead of sending the whole file again.
-
-This feature reduces wasted bandwidth and improves the user experience when transferring large files.
-
-### Large-File Transfer Optimization
-
-Large files should use more efficient transfer strategies than regular buffered reads and writes.
-
-Planned optimizations include:
-
-- On the client side, use `mmap` for files larger than a configured threshold.
-- On the server side, use `sendfile` when sending large files to the client.
-- Make the threshold configurable so different environments can tune performance behavior.
-
-## Phase 3: Database Support
-
-The third phase introduces database-backed metadata and account management. Instead of relying only on the physical file-system layout, the server can use database tables to describe users, directories, files, ownership, and transfer state.
-
-### Database-Backed File Structure
-
-Earlier phases may maintain a virtual directory forest in memory or on disk to isolate files between users and between directories owned by the same user. This model is intuitive, but it makes the server-side file organization more complicated as the system grows.
-
-The purpose of the directory forest is to represent relationships:
-
-- Which directories belong to which user.
-- Which directories are children of other directories.
-- Which files are contained in each directory.
-- Where each logical file is stored on the server.
-
-In this phase, these relationships should be moved into database tables. The database can store directory-to-directory relationships, directory-to-file relationships, file ownership, file metadata, and the real storage path of each file.
-
-Each physical file can be stored using a content-based alias, such as its hash value. With this design, the server no longer needs to mirror every user's logical directory tree as real directories on disk. Files from all users and all logical directories can be stored in a common server storage directory, while the database describes how those files appear to each user.
-
-### User Accounts And Authentication
-
-Database support also makes it possible to manage application users independently from system accounts.
-
-A user table can store information such as:
-
-- Username.
-- Password hash.
-- Per-user random salt.
-- User status.
-- Creation and update timestamps.
-
-During registration, the server should generate a random salt for the user, combine the salt with the original password, compute a secure password hash, and store only the hash and salt in the database.
-
-During login, the server should look up the user by username, read the stored salt, hash the submitted password using the same algorithm, and compare the computed hash with the stored password hash. The raw password should never be stored.
-
-Optional account features can include:
-
-- User logout.
-- User disable or lock status.
-- Password reset or password change.
-
-### Instant Upload By File Hash
-
-The database can also support instant upload behavior.
-
-Before uploading file content, the client can calculate the file hash and send it to the server. The server then checks whether a file with the same hash already exists in storage.
-
-If the file already exists, the server only needs to create a new logical file record for the current user and directory. The client does not need to upload the same content again.
-
-If the file does not exist, the server creates the necessary metadata and receives the file content normally.
-
-This feature reduces duplicate storage and avoids unnecessary network transfer.
-
-### Upload State Tracking
-
-The server must avoid exposing incomplete files as valid user files. Several designs are possible:
-
-- Add a transfer-status field to the file metadata table. New uploads start with an incomplete status and are marked complete only after the file content is fully received and verified.
-- Use a separate upload-session table for in-progress uploads. After the upload succeeds, move or promote the record into the main file metadata table.
-- Use another equivalent design, as long as incomplete uploads cannot be used as normal files.
-
-This state tracking is especially important when combined with resumable upload and instant upload logic.
-
-## Phase 4: Session Management And Connection Lifecycle
-
-The fourth phase improves concurrency and resource management. It separates fast interactive commands from long-running transfers and disconnects control connections that remain idle beyond a configured timeout.
-
-These features must work together. An upload or download must not block commands such as `pwd` or `ls`, and an active transfer must not be mistaken for an idle client and forcibly closed.
-
-### Separation Of Short And Long Commands
-
-Commands are divided according to how long they occupy a connection:
-
-- Short commands include authentication and metadata operations such as `pwd`, `cd`, `ls`, `mkdir`, `rmdir`, and `rm`. They use one persistent control connection and return quickly.
-- Long commands are `puts` and `gets`. Each transfer uses a separate TCP connection and runs in a background client worker.
-
-The main client thread remains available for user input while transfer workers perform file I/O. For example, a user can start a large download and continue browsing remote directories through the control connection.
-
-One logged-in client can therefore own multiple connections:
-
-```text
-client session
-|-- control connection: login and short commands
-|-- transfer connection: puts task A
-|-- transfer connection: gets task B
-`-- transfer connection: puts task C
+Cloud Drive Demo is a client-server file management system written in C. It provides a command-line interface for account management, remote directory operations, resumable file transfers, and concurrent background uploads and downloads.
+
+The project is currently at Phase 4. This document describes the current system first and then summarizes how each phase contributed to it. Earlier phase documents remain historical records; when their protocol or connection model differs, the Phase 4 behavior is authoritative.
+
+## Current Capabilities
+
+- Register and authenticate application users stored in MySQL/MariaDB.
+- Navigate and modify per-user virtual directories with `pwd`, `cd`, `ls`, `mkdir`, `rmdir`, and `rm`.
+- Upload with `puts` and download with `gets` while preserving resumable offsets.
+- Address physical content by SHA-256 and avoid duplicate upload data through instant upload.
+- Remove physical content only after its database reference count reaches zero.
+- Keep one persistent control connection for authentication and short commands.
+- Run each transfer on an independent TCP connection and background client thread.
+- Authorize all non-anonymous requests with a server-issued 16-byte SessionID.
+- Share user identity and virtual cwd across all connections in one session.
+- Close idle control connections with a timerfd-driven timing wheel without terminating active transfers.
+- Reconnect a lost control socket and return the client to the login menu without replaying the failed command.
+- Configure networking, database access, storage, logging, server workers, idle timeout, and client transfer limits.
+
+## Current Architecture
+
+```mermaid
+flowchart LR
+    User[CLI Main Thread]
+    Runtime[Client Runtime<br/>SessionID + CWD]
+    Control[Control Connection]
+    Workers[Background Transfer Threads]
+    Event[Server epoll Thread]
+    Pool[Server Worker Pool]
+    Sessions[Session Table]
+    DB[(MySQL)]
+    Storage[(Content Storage)]
+
+    User --> Runtime
+    Runtime --> Control
+    Runtime -->|task snapshots| Workers
+    Control -->|short commands| Event
+    Workers -->|one connection per transfer| Event
+    Event --> Sessions
+    Event --> Pool
+    Pool --> DB
+    Pool --> Storage
 ```
 
-Transfer concurrency should be limited by configuration so one client cannot create an unbounded number of sockets or worker threads.
+The control connection is long-lived and returns to epoll after each short command. A transfer connection is single-purpose: after its first authenticated `puts` or `gets` request, one worker owns the fd until the transfer finishes, then detaches and closes it.
 
-### SessionID
+## Protocol And Authentication
 
-A socket fd can no longer identify a user because one user may have several connections. After successful login, the server creates a random SessionID and returns it to the client. The client includes this SessionID in every authenticated request, including the first request on each transfer connection.
+The current protocol is TLV2. Every packet uses a 36-byte header containing:
 
-Login and registration requests are anonymous and carry an empty SessionID. Every other request must carry a non-empty SessionID that exists in the session table. The server rejects an empty, unknown, or conflicting SessionID before dispatching the command.
+| Field | Size |
+| --- | --- |
+| Magic | 4 bytes |
+| Version | 4 bytes |
+| Command | 4 bytes |
+| Status | 4 bytes |
+| Payload length | 4 bytes |
+| SessionID | 16 bytes |
 
-### Idle Connection Kick-Out
+Login and registration requests carry an all-zero SessionID. Successful login creates a random 128-bit SessionID and returns it in the response. Every other request must carry a valid ID, and normal responses echo that ID for client-side validation.
 
-The server should release inactive control connections so abandoned clients do not consume file descriptors and session resources indefinitely. The timeout should be configurable; 30 seconds is suitable for demonstration, while a production value would normally be longer.
+The SessionID is a stateful, in-memory bearer credential rather than a JWT. The server maintains both a SessionID index and an fd index so a session can own one control connection and multiple transfer connections while preventing one fd from switching identities.
 
-The timeout applies to an idle control connection, not to a transfer that is making progress. The server must follow these rules:
+## Storage And Transfer Model
 
-- Update a control connection's last-activity time whenever a complete, valid request is received.
-- Update a transfer connection's activity while transfer packets or file bytes are being exchanged.
-- Never kick out a connection merely because a large file operation takes longer than the idle timeout.
-- Close an idle control fd by removing it from epoll, detaching it from the session table, and then closing the fd.
-- Keep a session alive while at least one transfer connection is still bound to it.
-- Delete the session and invalidate its SessionID only after its final bound connection closes.
+MySQL is the authority for user-visible paths and file metadata. Physical bytes are stored separately:
 
-This connection-based lifecycle allows an ongoing download to finish even if the unused control connection is kicked out. It also avoids terminating the entire client process from the server side.
+```text
+data/files/<sha256_hex>          completed content
+data/.upload/<sha256_hex>.part   interrupted upload content
+downloads/<name>.part            interrupted client download
+```
 
-### Timeout Detection
+An upload computes SHA-256 before transfer. If completed content with that hash already exists, the server creates only the logical path and updates its reference count. Otherwise, the server resumes the hash-named partial file, verifies the completed content, publishes it under the content-addressed path, and then records the logical path.
 
-The simplest implementation gives `epoll_wait()` a one-second timeout. Once per tick, the server scans all idle-managed connections and closes those whose last activity exceeds the configured limit. This is easy to implement but performs an O(n) scan every second.
+Downloads resolve the user's virtual path through database metadata. The client resumes into a `.part` file, validates the completed SHA-256 digest, and renames the file only after validation succeeds. The server sends download payload bytes with `sendfile`; current uploads use buffered `read` and protocol payloads rather than the Phase 2 `mmap` experiment.
 
-For larger connection counts, use a timing wheel:
+## Session And Connection Lifecycle
 
-- Create a circular array with one bucket per second of the timeout window. A 30-second timeout uses at least 30 buckets.
-- Each bucket stores references to connections expected to expire at that time.
-- When a connection is accepted or becomes active, schedule it in the bucket for `current_tick + timeout`.
-- Store an activity generation or exact deadline with each entry. Rescheduling may leave an old entry in a bucket; the generation or deadline prevents that stale entry from closing an active connection.
-- Advance the wheel once per second, preferably using a `timerfd` registered with epoll rather than relying on wall-clock timeouts.
-- When processing a bucket, close only entries whose stored deadline still matches the connection and whose idle duration has actually reached the limit.
+```text
+successful login
+    -> create session and bind control fd
 
-Use a monotonic clock such as `CLOCK_MONOTONIC` for deadlines. Wall-clock changes must not make clients expire early or remain connected indefinitely.
+authenticated transfer request
+    -> bind new transfer fd to the same SessionID
 
-### Client Behavior After Kick-Out
+transfer completes
+    -> detach and close only that transfer fd
 
-The minimum behavior is explicit recovery:
+control connection times out or disconnects
+    -> detach and close only the control fd
 
-- If the control connection has been closed, the next short command reports that the session connection expired.
-- The client keeps running instead of exiting abruptly.
-- Existing background transfers continue independently when their transfer connections remain valid.
-- The user can reconnect and log in again to obtain a new SessionID.
+final bound connection closes
+    -> remove and free the session
+```
 
-Automatic reconnection is optional. If implemented, the client should reconnect and re-authenticate before retrying a short command. It must not blindly replay non-idempotent commands such as `mkdir`, `rm`, or `puts`, because the server may have completed the original request before the connection was lost.
+This connection-counted lifecycle allows an already authenticated transfer to finish after the control connection is lost. The client clears its local control-session state, reconnects the socket, and returns to the login menu. It does not automatically reuse credentials, re-authenticate, or replay the command that observed the failure.
 
+## Idle Control Timeout
+
+Accepted sockets are scheduled in a timing wheel driven once per second by a `CLOCK_MONOTONIC` timerfd. The timeout applies to sockets waiting for their next control request:
+
+- A socket is removed from the wheel while a worker handles its request.
+- A control socket receives a new absolute deadline when the short command completes and it is returned to epoll.
+- A transfer socket leaves the wheel after its authenticated transfer request and stays under worker ownership until close.
+- An expired control socket is removed from epoll, detached from its session, shut down, and closed.
+
+Each timer node stores an absolute deadline. Its bucket is `ceil(deadline) % slot_count`, while the wheel advances a current-time cursor. Remaining time decreases as the cursor moves, but the absolute target bucket does not change. Recomputing every node on every tick would produce the same bucket and turn wheel advancement into a full scan.
+
+## Configuration
+
+The server configuration contains:
+
+- `[network]`: listen host, port, and backlog.
+- `[mysql]`: database endpoint, credentials, charset, and pool size.
+- `[storage]`: completed-content and partial-upload directories.
+- `[thread_pool]`: worker count and queue capacity.
+- `[session]`: idle control timeout.
+- `[log]`: level and output file.
+
+The client configuration contains:
+
+- `[remote]`: server host and port.
+- `[storage]`: download directory.
+- `[transfer]`: maximum concurrent tasks plus connect and I/O timeouts.
+- `[log]`: level and output file.
+
+## Phase Evolution
+
+### Phase 1: Basic Client And Server
+
+Phase 1 established the initial TCP client/server workflow:
+
+- Command parsing and shell-like remote operations.
+- An epoll-based server event loop.
+- A pthread worker pool.
+- TLV1 framing and protocol helpers.
+- Configuration and server logging.
+- Basic upload and download flows.
+
+The Phase 1 authentication, path layout, TLV1 header, and reusable single-connection model are historical and no longer describe the current implementation.
+
+### Phase 2: Resumable Transfers
+
+Phase 2 added reliability and experimented with large-file optimizations:
+
+- Upload and download offsets for interrupted transfers.
+- Protocol data chunks for upload content.
+- Server-side `sendfile` for downloads.
+- A client-side `mmap` upload path controlled by a size threshold.
+
+Resume behavior and `sendfile` remain in Phase 4. The `mmap` upload path and its configurable threshold are not present in the current source; uploads now use buffered reads.
+
+### Phase 3: Database-Backed Metadata
+
+Phase 3 moved user-visible state into MySQL and separated logical paths from physical content:
+
+- `users`, `paths`, and `files` tables.
+- Password verification through `crypt_r`; the salt is embedded in the stored modular password hash.
+- Per-user virtual directory trees.
+- SHA-256 content addressing and instant upload.
+- Reference-counted deletion.
+- Hash-named `.part` files for interrupted uploads.
+- Verification before completed content and database metadata are published.
+
+Phase 3 still associated identity primarily with one connection. Phase 4 replaced that restriction with SessionID-based multi-connection sessions.
+
+### Phase 4: SessionID And Concurrent Transfers
+
+Phase 4 introduced the current connection and ownership model:
+
+- TLV2 with a 16-byte SessionID in every packet header.
+- Random SessionID creation after successful login.
+- SessionID and fd hash indexes protected by one session-table mutex.
+- One control connection plus multiple independent transfer connections per session.
+- Background client transfer threads with immutable SessionID, cwd, and path snapshots.
+- Shared session cwd for later requests.
+- Connection-counted session lifetime.
+- Configurable client transfer concurrency and socket timeouts.
+- A monotonic timerfd and timing wheel for idle control connections.
+- Automatic control-socket reconnection followed by explicit login, without command replay.
+
+See [Phase 4 Session ID](phase-4-session-id.md) for protocol fields, authorization flow, ownership rules, timing-wheel behavior, configuration, and tests.
+
+## Current Limitations
+
+- SessionIDs are bearer credentials sent over unencrypted TCP; TLS is not implemented.
+- Sessions and SessionIDs are process-local and disappear when the server exits.
+- There is no explicit logout, server-side revocation, token rotation, or fixed SessionID expiry.
+- Idle timeout protects waiting control connections, not workers blocked in a long or stalled transfer.
+- Short commands and transfers share the same server worker pool.
+- The client reconnects the control socket but does not automatically re-authenticate or replay failed commands.
+- Prepared SQL statements, persistent upload-session records, and an orphan-content scanner are not implemented.
+
+## Further Reading
+
+- [Phase 1 basic framework](phase-1-basic.md)
+- [Phase 2 resumable transfers](phase-2-resume.md)
+- [Phase 3 database-backed metadata](phase-3-database.md)
+- [Phase 4 SessionID and connection lifecycle](phase-4-session-id.md)
+- [Cross-phase implementation details](details.md)

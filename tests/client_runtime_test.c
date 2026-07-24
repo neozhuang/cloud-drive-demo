@@ -3,6 +3,8 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 int main(void)
 {
@@ -12,6 +14,7 @@ int main(void)
     session_id_t snapshot_id;
     char username[64];
     char cwd[PATH_MAX];
+    int sockets[2];
 
     memset(&config, 0, sizeof(config));
     strcpy(config.remote.host, "127.0.0.1");
@@ -46,7 +49,12 @@ int main(void)
                                            cwd, sizeof(cwd)) == 0);
     assert(strcmp(cwd, "/docs") == 0);
 
-    client_runtime_clear_session(&runtime);
+    assert(socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    runtime.control_fd = sockets[0];
+    client_runtime_disconnect_control(&runtime);
+    assert(runtime.control_fd == -1);
+    assert(read(sockets[1], username, 1) == 0);
+    close(sockets[1]);
     assert(client_runtime_session_snapshot(&runtime, &snapshot_id,
                                            username, sizeof(username),
                                            cwd, sizeof(cwd)) == -1);

@@ -25,6 +25,7 @@ int client_runtime_init(client_runtime_t *runtime,
                         const client_config_t *config,
                         const char *download_dir);
 void client_runtime_destroy(client_runtime_t *runtime);
+void client_runtime_disconnect_control(client_runtime_t *runtime);
 
 int client_runtime_publish_session(client_runtime_t *runtime,
                                    const session_id_t *session_id,

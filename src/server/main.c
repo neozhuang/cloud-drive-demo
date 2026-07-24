@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/timerfd.h>
 
 #include "common/protocol.h"
 #include "server/config.h"
@@ -22,6 +23,7 @@
 #include "server/thread_pool.h"
 #include "server/session.h"
 #include "server/handler_event.h"
+#include "server/timer_wheel.h"
 #include "common/tui.h"
 
 #define MAX_EVENTS 1024
@@ -36,6 +38,22 @@
  * handler.
  */
 static int pipe_fd[2];
+
+typedef struct {
+    int epoll_fd;
+    session_table_t *session_table;
+} idle_expire_context_t;
+
+static void close_idle_client(int client_fd, void *arg)
+{
+    idle_expire_context_t *context = arg;
+
+    LOG_INFO("Closing idle control connection, fd=%d", client_fd);
+    epoll_ctl(context->epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
+    session_detach_fd(context->session_table, client_fd);
+    shutdown(client_fd, SHUT_RDWR);
+    close(client_fd);
+}
 
 /*
  * handle_sigint:
@@ -57,10 +75,12 @@ int main(int argc, char* argv[]){
 
     int listen_fd;
     int epoll_fd;
+    int timer_fd;
 
     thread_pool_t* thread_pool;
     database_pool_t* db_pool;
     session_table_t* session_table;
+    timer_wheel_t *timer_wheel;
 
     /* Print a beautiful banner and the current time */
     tui_print_banner();
@@ -163,11 +183,53 @@ int main(int argc, char* argv[]){
         return -1;
     }
 
+    timer_wheel = timer_wheel_create(
+        (unsigned int)config.session.idle_timeout_seconds);
+    if (timer_wheel == NULL) {
+        LOG_ERROR("Failed to initialize idle timer wheel");
+        thread_pool_destroy(thread_pool);
+        session_table_destroy(session_table);
+        database_pool_destroy(db_pool);
+        log_close();
+        return -1;
+    }
+
     // Create the self-pipe used to wake epoll on SIGINT.
     if (pipe(pipe_fd) != 0) {
         perror("pipe");
         thread_pool_destroy(thread_pool);
         session_table_destroy(session_table);
+        timer_wheel_destroy(timer_wheel);
+        database_pool_destroy(db_pool);
+        log_close();
+        return -1;
+    }
+
+
+    timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);
+    if (timer_fd < 0) {
+        perror("timerfd_create");
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        thread_pool_destroy(thread_pool);
+        session_table_destroy(session_table);
+        timer_wheel_destroy(timer_wheel);
+        database_pool_destroy(db_pool);
+        log_close();
+        return -1;
+    }
+    struct itimerspec timer_spec = {
+        .it_interval = {.tv_sec = 1, .tv_nsec = 0},
+        .it_value = {.tv_sec = 1, .tv_nsec = 0},
+    };
+    if (timerfd_settime(timer_fd, 0, &timer_spec, NULL) != 0) {
+        perror("timerfd_settime");
+        close(timer_fd);
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        thread_pool_destroy(thread_pool);
+        session_table_destroy(session_table);
+        timer_wheel_destroy(timer_wheel);
         database_pool_destroy(db_pool);
         log_close();
         return -1;
@@ -178,8 +240,10 @@ int main(int argc, char* argv[]){
     if (listen_fd < 0) {
         close(pipe_fd[0]);
         close(pipe_fd[1]);
+        close(timer_fd);
         thread_pool_destroy(thread_pool);
         session_table_destroy(session_table);
+        timer_wheel_destroy(timer_wheel);
         database_pool_destroy(db_pool);
         log_close();
         return -1;
@@ -189,13 +253,36 @@ int main(int argc, char* argv[]){
     // listen_fd: new client connections
     // pipe_fd[0]: shutdown notifications from handle_sigint
     epoll_fd = epoll_create1(0);
-    network_add_epoll_fd(epoll_fd, listen_fd, EPOLLIN);
-    network_add_epoll_fd(epoll_fd, pipe_fd[0], EPOLLIN);
+    if (epoll_fd < 0 ||
+        network_add_epoll_fd(epoll_fd, listen_fd, EPOLLIN) != 0 ||
+        network_add_epoll_fd(epoll_fd, pipe_fd[0], EPOLLIN) != 0 ||
+        network_add_epoll_fd(epoll_fd, timer_fd, EPOLLIN) != 0) {
+        perror("epoll setup");
+        if (epoll_fd >= 0) {
+            close(epoll_fd);
+        }
+        close(listen_fd);
+        close(pipe_fd[0]);
+        close(pipe_fd[1]);
+        close(timer_fd);
+        thread_pool_destroy(thread_pool);
+        session_table_destroy(session_table);
+        timer_wheel_destroy(timer_wheel);
+        database_pool_destroy(db_pool);
+        log_close();
+        return -1;
+    }
+
+    idle_expire_context_t idle_context = {
+        .epoll_fd = epoll_fd,
+        .session_table = session_table,
+    };
 
     struct epoll_event events[MAX_EVENTS];
 
     while (1) {
         int nready = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        int timer_ready = 0;
 
         if (nready == -1) {
             // interrupted by signal, just continue
@@ -207,9 +294,11 @@ int main(int argc, char* argv[]){
             close(listen_fd);
             close(pipe_fd[0]);
             close(pipe_fd[1]);
+            close(timer_fd);
             close(epoll_fd);
             thread_pool_destroy(thread_pool);
             session_table_destroy(session_table);
+            timer_wheel_destroy(timer_wheel);
             database_pool_destroy(db_pool);
             log_close();
             return -1;
@@ -231,13 +320,25 @@ int main(int argc, char* argv[]){
                 close(listen_fd);
                 close(pipe_fd[0]);
                 close(pipe_fd[1]);
+                close(timer_fd);
                 close(epoll_fd);
                 thread_pool_destroy(thread_pool);
                 session_table_destroy(session_table);
+                timer_wheel_destroy(timer_wheel);
                 database_pool_destroy(db_pool);
                 LOG_INFO("server closed");
                 log_close();
                 return 0;
+            }
+
+            if (ready_fd == timer_fd) {
+                uint64_t expirations;
+
+                if (read(timer_fd, &expirations, sizeof(expirations)) ==
+                    (ssize_t)sizeof(expirations)) {
+                    timer_ready = 1;
+                }
+                continue;
             }
 
             /**
@@ -245,7 +346,7 @@ int main(int argc, char* argv[]){
              * in the accept queue.
              */
             if (ready_fd == listen_fd) {
-                handle_accept_event(epoll_fd, listen_fd);
+                handle_accept_event(epoll_fd, listen_fd, timer_wheel);
             } else {
                 /**
                  * For client fds, either a packet is ready to read or the
@@ -253,17 +354,26 @@ int main(int argc, char* argv[]){
                  */
                 handle_client_event(epoll_fd, ready_fd, events[i].events,
                                     thread_pool, db_pool, session_table,
+                                    timer_wheel,
                                     storage_root, transfer_temp_dir);
             }
+        }
+        /* Process expiry after this batch so no stale client event follows a
+         * timer-driven close and accidentally targets a reused fd. */
+        if (timer_ready) {
+            (void)timer_wheel_advance(timer_wheel, close_idle_client,
+                                      &idle_context);
         }
     }
 
     close(listen_fd);
     close(pipe_fd[0]);
     close(pipe_fd[1]);
+    close(timer_fd);
     close(epoll_fd);
     thread_pool_destroy(thread_pool);
     session_table_destroy(session_table);
+    timer_wheel_destroy(timer_wheel);
     database_pool_destroy(db_pool);
     LOG_INFO("server closed");
     log_close();

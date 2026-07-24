@@ -33,11 +33,16 @@ typedef struct log_config_s {
     char log_file[PATH_MAX];
 } log_config_t;
 
+typedef struct session_config_s {
+    int idle_timeout_seconds;
+} session_config_t;
+
 typedef struct server_config_s {
     network_config_t network;
     mysql_config_t mysql;
     storage_config_t storage;
     thread_pool_config_t thread_pool;
+    session_config_t session;
     log_config_t log;
 } server_config_t;
 

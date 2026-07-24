@@ -6,6 +6,8 @@ Because one logged-in user can now use several TCP connections, a socket fd is n
 
 The implemented mechanism is a stateful, in-memory session, not a JWT. The server stores each SessionID and its user context until the session's final bound connection closes.
 
+This document describes the current implemented phase rather than a future design proposal.
+
 ## Goals
 
 - Keep short commands responsive while uploads and downloads run in the background.
@@ -16,6 +18,21 @@ The implemented mechanism is a stateful, in-memory session, not a JWT. The serve
 - Reject empty, unknown, or conflicting SessionIDs before command dispatch.
 - Remove session state when its final connection closes.
 - Keep session ownership and synchronization explicit on both client and server.
+
+## Migration From Phase 3
+
+| Concern | Phase 3 model | Phase 4 model |
+| --- | --- | --- |
+| Authenticated identity | Associated with one socket fd | Associated with a 16-byte SessionID |
+| Connections per login | One reusable connection | One control connection plus multiple transfer connections |
+| Short commands | Synchronous on the connected fd | Synchronous on the persistent control fd |
+| File transfers | Occupy the reusable connection | Use independent single-purpose connections |
+| Client execution | Foreground transfer flow | Background transfer threads |
+| Transfer completion | Return the fd to epoll | Detach and close the transfer fd |
+| Virtual cwd | Connection-oriented state | Shared session state, snapshotted for submitted transfers |
+| Idle control cleanup | Not implemented | Monotonic timerfd and timing wheel |
+
+Database metadata, SHA-256 content addressing, resumable offsets, instant upload, and reference-counted deletion remain from Phase 3. Phase 4 changes connection identity and ownership without replacing those storage rules.
 
 ## Architecture
 
@@ -321,6 +338,12 @@ Background workers do not retain a pointer to mutable runtime session fields. `c
 
 All packets sent by a worker use the task's copied SessionID. All received packets are checked against the same copy.
 
+### Control Connection Recovery
+
+Before submitting a command, the client checks the control socket without blocking. A closed socket, control I/O failure, or unauthorized control response clears the old SessionID and returns a dedicated reconnect result to the main loop. The client then opens a new control socket and returns to the login menu.
+
+The command that observed the disconnect is not replayed. Transfers that have already authenticated their independent sockets continue with their SessionID snapshots; only new commands use the SessionID obtained by logging in again. If reconnection fails, the client reports the error and exits instead of repeatedly operating on the stale fd.
+
 ## Session Lifecycle
 
 The server session lifecycle is connection-count based:
@@ -351,6 +374,47 @@ This means closing the control connection does not immediately destroy a session
 
 Sessions are process-local and are destroyed when the server exits. The client does not persist its SessionID and must log in again after restarting.
 
+### Idle Control Connection Timeout
+
+Accepted sockets enter a one-second-granularity timing wheel. A control fd is temporarily removed from epoll and the wheel while its request is handled, then receives a fresh monotonic deadline when the worker finishes. After a valid `puts` or `gets` first packet, the transfer fd leaves the wheel permanently, so a long-running transfer is never treated as an idle control connection.
+
+A `CLOCK_MONOTONIC` timerfd registered with epoll drives the wheel. The main event loop processes the other events returned in the same epoll batch before advancing the timer, which avoids closing an old fd and then handling a stale event after that integer fd has been reused. Expired control fds are removed from epoll, detached from the session table, shut down, and closed.
+
+Each timer node stores an absolute `struct timespec deadline`. The slot mapping is:
+
+```text
+deadline_tick = ceil(deadline in seconds)
+slot = deadline_tick % slot_count
+```
+
+The deadline does not count down. The remaining duration is `deadline - now`, while the wheel's current-time cursor advances once per second. For example, with four slots, moving from tick 10 to tick 11 changes the remaining distance to a deadline at tick 13 from three ticks to two, but the target remains `13 % 4`. Recomputing the node on every tick would therefore select the same slot.
+
+When a deadline is refreshed, the implementation removes the existing node, updates its absolute deadline, and links it into the newly calculated slot. If a slot is encountered through modulo wraparound before a node's exact deadline, the absolute `timespec` comparison prevents early expiration and the node remains scheduled for a later pass. This provides one-second wake-up granularity without scanning every timer on each tick.
+
+The configured wheel contains `idle_timeout_seconds + 1` slots. The extra slot covers deadlines rounded up because of a non-zero nanosecond component. Expiration can occur less than one tick after the exact deadline, but not before it.
+
+## Configuration
+
+The server controls how long a socket may wait for its next control request:
+
+```ini
+[session]
+idle_timeout_seconds = 30
+```
+
+This idle timeout is separate from transfer socket timeouts. It is applied by the server timing wheel only while a connection is waiting in the event loop.
+
+The client limits background transfer creation and configures the sockets opened by transfer tasks:
+
+```ini
+[transfer]
+max_concurrent = 4
+connect_timeout_ms = 5000
+io_timeout_ms = 30000
+```
+
+`max_concurrent` is a per-client-process limit. `connect_timeout_ms` limits connection establishment, and `io_timeout_ms` configures transfer socket I/O timeouts. These values do not change the server's idle control deadline.
+
 ## Concurrency And Ownership
 
 The server session table can be used by the epoll thread and worker threads concurrently. One mutex protects:
@@ -370,7 +434,32 @@ Packet ownership remains separate from session ownership. The event layer transf
 
 - There is no explicit logout command or server-side revocation interface.
 - SessionIDs are bearer credentials sent over unencrypted TCP; TLS is not implemented.
-- The client does not persist sessions, automatically reconnect the control connection, or re-authenticate after disconnect.
+- SessionIDs have no absolute lifetime or independent inactivity expiry. A session remains valid while at least one bound connection exists.
+- Sessions are not persisted and all SessionIDs become invalid when the server exits.
+- The client automatically reconnects a lost control socket, but it does not persist credentials, automatically re-authenticate, or replay the failed command.
+- A client that obtains a valid SessionID can attach another connection to that session; there is no IP binding, token rotation, or per-session connection limit.
+- Transfer connections are outside the idle timing wheel after authorization. A stalled transfer can continue to occupy a server worker until socket I/O fails or the peer disconnects.
+- Short commands and long transfers share one server worker pool, so enough blocked transfers can delay control work.
+
+## Verification And Tests
+
+The Phase 4 unit tests can be built and run with:
+
+```bash
+make protocol-test session-test timer-wheel-test \
+  client-runtime-test client-connection-test client-command-test
+```
+
+| Target | Test file | Main coverage |
+| --- | --- | --- |
+| `protocol-test` | `tests/protocol_session_test.c` | TLV2 SessionID encode/decode, anonymous ID, and payload validation |
+| `session-test` | `tests/session_test.c` | Session creation, fd binding, shared cwd, conflicts, detach, and final cleanup |
+| `timer-wheel-test` | `tests/timer_wheel_test.c` | Expiration, deadline refresh, removal, fd reuse, and publish rollback |
+| `client-runtime-test` | `tests/client_runtime_test.c` | Session publication, snapshots, cwd updates, and clearing |
+| `client-connection-test` | `tests/client_connection_test.c` | Control-socket liveness checks |
+| `client-command-test` | `tests/client_command_test.c` | Reconnect result and stale-session cleanup after command failure |
+
+These are focused unit tests. The repository does not yet include an automated end-to-end test for login followed by concurrent transfers, control timeout during a transfer, or high-contention fd reuse.
 
 ## Main Implementation Files
 
@@ -380,11 +469,25 @@ Packet ownership remains separate from session ownership. The event layer transf
 | `src/common/protocol.c` | Header encoding/decoding and SessionID comparison |
 | `include/server/session.h` | Session table and context interface |
 | `src/server/session.c` | ID generation, indexes, binding, authorization, cwd updates, and cleanup |
+| `include/server/timer_wheel.h` | Idle timing-wheel interface and deterministic test variants |
+| `src/server/timer_wheel.c` | Idle-control deadlines, refreshes, removal, and expiry collection |
+| `src/server/main.c` | timerfd setup, epoll integration, wheel advancement, and expiration callback |
+| `include/server/config.h` | Server idle-timeout configuration field |
+| `src/server/config.c` | Server configuration parsing |
 | `src/server/handler_event.c` | Anonymous-command rules and pre-dispatch authorization |
 | `src/server/handler_basic.c` | Login session creation and SessionID-bearing responses |
 | `src/server/handler_transfer.c` | Transfer packet validation and transfer-fd detach |
 | `include/client/runtime.h` | Client runtime session ownership |
 | `src/client/runtime.c` | Session publication, snapshots, updates, and clearing |
+| `src/client/main.c` | Control reconnect loop and return to authentication |
+| `src/client/config.c` | Client transfer-limit and socket-timeout parsing |
+| `src/client/connection.c` | Connection establishment, timeout setup, and liveness checks |
 | `src/client/user_auth.c` | Anonymous authentication and login SessionID acceptance |
 | `src/client/command.c` | SessionID use and validation for short commands |
 | `src/client/transfer.c` | Per-task session snapshots and transfer packet validation |
+| `tests/protocol_session_test.c` | TLV2 SessionID protocol tests |
+| `tests/session_test.c` | Server session-table tests |
+| `tests/timer_wheel_test.c` | Idle timing-wheel tests |
+| `tests/client_runtime_test.c` | Client session-state tests |
+| `tests/client_connection_test.c` | Client connection-state tests |
+| `tests/client_command_test.c` | Client reconnect-result tests |

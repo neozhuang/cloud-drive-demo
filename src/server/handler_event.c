@@ -11,6 +11,7 @@
 
 #include "common/log.h"
 #include "server/network.h"
+#include "server/timer_wheel.h"
 
 static int command_is_anonymous(cmd_type_t type)
 {
@@ -30,15 +31,18 @@ static int send_event_error(int client_fd,
 }
 
 static void close_client(int epoll_fd, int client_fd,
-                         session_table_t *session_table)
+                         session_table_t *session_table,
+                         timer_wheel_t *timer_wheel)
 {
     // Remove the client from all server-owned state before closing the fd.
+    timer_wheel_remove(timer_wheel, client_fd);
     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
     session_detach_fd(session_table, client_fd);
     close(client_fd);
 }
 
-void handle_accept_event(int epoll_fd, int listen_fd)
+void handle_accept_event(int epoll_fd, int listen_fd,
+                         timer_wheel_t *timer_wheel)
 {
     // Accept one pending connection and register its session with epoll.
     int client_fd = accept(listen_fd, NULL, NULL);
@@ -49,7 +53,12 @@ void handle_accept_event(int epoll_fd, int listen_fd)
 
     if (network_add_epoll_fd(epoll_fd, client_fd, EPOLLIN | EPOLLRDHUP) != 0) {
         LOG_ERROR("Failed to add client fd to epoll listen queue");
-        close_client(epoll_fd, client_fd, NULL);
+        close_client(epoll_fd, client_fd, NULL, timer_wheel);
+        return;
+    }
+    if (timer_wheel_track(timer_wheel, client_fd) != 0) {
+        LOG_ERROR("Failed to track client idle timeout");
+        close_client(epoll_fd, client_fd, NULL, timer_wheel);
         return;
     }
     LOG_INFO("Accepted client connection, fd=%d", client_fd);
@@ -57,12 +66,13 @@ void handle_accept_event(int epoll_fd, int listen_fd)
 
 void handle_client_event(int epoll_fd, int client_fd, uint32_t events, 
                          thread_pool_t *thread_pool, database_pool_t* db_pool,
-                         session_table_t *session_table,
-                         const char* storage_root, const char* transfer_temp_dir)
+                          session_table_t *session_table,
+                          timer_wheel_t *timer_wheel,
+                          const char* storage_root, const char* transfer_temp_dir)
 {
     // Remote hangup or socket error: release the client immediately.
     if (events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR)) {
-        close_client(epoll_fd, client_fd, session_table);
+        close_client(epoll_fd, client_fd, session_table, timer_wheel);
         return;
     }
 
@@ -70,19 +80,21 @@ void handle_client_event(int epoll_fd, int client_fd, uint32_t events,
         // Packet handling may be expensive, so move it to the worker pool.
         packet_task_t *task = calloc(1, sizeof(*task));
         if (task == NULL) {
-            close_client(epoll_fd, client_fd, session_table);
+            close_client(epoll_fd, client_fd, session_table, timer_wheel);
             return;
         }
 
         task->client_fd = client_fd;
+        task->epoll_fd = epoll_fd;
         task->db_pool = db_pool;
         task->session_table = session_table;
+        task->timer_wheel = timer_wheel;
         strncpy(task->storage_root, storage_root, sizeof(task->storage_root) - 1);
         task->storage_root[sizeof(task->storage_root) - 1] = '\0';
 
         if (protocol_recv_packet(client_fd, &task->packet) != 0) {
             free(task);
-            close_client(epoll_fd, client_fd, session_table);
+            close_client(epoll_fd, client_fd, session_table, timer_wheel);
             return;
         }
 
@@ -94,7 +106,8 @@ void handle_client_event(int epoll_fd, int client_fd, uint32_t events,
                 packet_release(&task->packet);
                 free(task);
                 if (send_ret != 0) {
-                    close_client(epoll_fd, client_fd, session_table);
+                    close_client(epoll_fd, client_fd, session_table,
+                                 timer_wheel);
                 }
                 return;
             }
@@ -108,10 +121,15 @@ void handle_client_event(int epoll_fd, int client_fd, uint32_t events,
             packet_release(&task->packet);
             free(task);
             if (send_ret != 0) {
-                close_client(epoll_fd, client_fd, session_table);
+                close_client(epoll_fd, client_fd, session_table,
+                             timer_wheel);
             }
             return;
         }
+
+        /* A worker-owned fd is busy, not idle. Re-arm control fds after the
+         * short request completes; transfer fds remain worker-owned. */
+        timer_wheel_remove(timer_wheel, client_fd);
 
         // handle puts and gets request
         if (task->packet.header.type == CMD_PUTS_REQ || task->packet.header.type == CMD_GETS_REQ) {
@@ -119,7 +137,7 @@ void handle_client_event(int epoll_fd, int client_fd, uint32_t events,
             if (transfer_task == NULL) {
                 packet_release(&task->packet);
                 free(task);
-                close_client(epoll_fd, client_fd, session_table);
+                close_client(epoll_fd, client_fd, session_table, timer_wheel);
                 return;
             }
 
@@ -144,17 +162,18 @@ void handle_client_event(int epoll_fd, int client_fd, uint32_t events,
             if (thread_pool_add(thread_pool, handle_transfer_task, transfer_task) != 0) {
                 packet_release(&transfer_task->packet);
                 free(transfer_task);
-                close_client(epoll_fd, client_fd, session_table);
+                close_client(epoll_fd, client_fd, session_table, timer_wheel);
                 LOG_ERROR("Failed to add gets/puts packet task");
             }
             return;
         }
 
         // Handle common task: login, register, pwd, cd, ls, rmdir, mkdir, rm, ...
+        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, NULL);
         if (thread_pool_add(thread_pool, handle_basic_task, task) != 0) {
             packet_release(&task->packet);
             free(task);
-            close_client(epoll_fd, client_fd, session_table);
+            close_client(epoll_fd, client_fd, session_table, timer_wheel);
             LOG_ERROR("Failed to add common packet task");
             return;
         }

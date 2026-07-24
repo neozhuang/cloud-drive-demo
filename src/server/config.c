@@ -51,6 +51,8 @@ static int handler(void* user, const char* section, const char* name,
         pconfig->thread_pool.thread_num = atoi(value);
     } else if (MATCH("thread_pool", "queue_capacity")) {
         pconfig->thread_pool.queue_capacity = atoi(value);
+    } else if (MATCH("session", "idle_timeout_seconds")) {
+        pconfig->session.idle_timeout_seconds = atoi(value);
     } else if (MATCH("log", "log_level")) {
         strncpy(pconfig->log.log_level, value, sizeof(pconfig->log.log_level) - 1);
         pconfig->log.log_level[sizeof(pconfig->log.log_level) - 1] = '\0';
@@ -95,6 +97,10 @@ void server_config_print(const server_config_t *pconfig)
     printf("\n[thread_pool]\n");
     printf("thread_num = %d\n", pconfig->thread_pool.thread_num);
     printf("queue_capacity = %d\n", pconfig->thread_pool.queue_capacity);
+
+    printf("\n[session]\n");
+    printf("idle_timeout_seconds = %d\n",
+           pconfig->session.idle_timeout_seconds);
 
     printf("\n[log]\n");
     printf("log_level = %s\n", pconfig->log.log_level);

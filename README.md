@@ -1,40 +1,45 @@
 # Cloud Drive Demo
 
-A cloud drive demo implemented in C. The project is currently in Phase 3, with a TCP client/server framework, MySQL-backed users and metadata, per-user virtual directory isolation, content-addressed physical storage, instant upload, reference-counted deletion, resumable upload/download, large-file transfer optimization, and configurable logging.
+Cloud Drive Demo is a command-line cloud drive implemented in C. The current Phase 4 implementation combines MySQL-backed users and virtual paths, content-addressed file storage, resumable transfers, and SessionID-based concurrent control and transfer connections.
 
 ## Current Technology
 
-- Language and build: C, GCC, Makefile, pthread.
-- Network model: TCP sockets; the server uses epoll to monitor connection and client events.
-- Concurrency model: the main thread handles accept/epoll, and a worker thread pool handles command packets and file transfer tasks.
-- Communication protocol: a custom TLV binary protocol with magic, version, command, status, and payload length fields.
+- Language and build: C, GCC, Make, and pthreads.
+- Network model: TCP sockets with a server-side epoll event loop.
+- Concurrency model: the main server thread handles accept and epoll events, while a worker pool handles commands and transfers. Client transfers run in background threads.
+- Protocol: a custom TLV2 binary protocol with a 36-byte header, including a server-issued 16-byte SessionID.
+- Session model: an in-memory SessionID index and fd index allow one authenticated session to own a control connection and multiple transfer connections.
 - Database: MySQL/MariaDB stores users, virtual paths, physical file metadata, hashes, sizes, and reference counts.
-- Database client: `libmysqlclient` with a custom server-side connection pool.
+- Database client: `libmysqlclient` with a server-side connection pool.
 - Hashing: OpenSSL EVP SHA-256 for content addressing, upload verification, instant upload, and download validation.
-- File transfer: fixed-size `CMD_FILE_DATA` packets, resumable transfer offsets, client-side `mmap` for large uploads, and server-side `sendfile` for downloads.
+- File transfer: resumable `CMD_FILE_DATA` payloads of up to 4096 bytes and server-side `sendfile` for download data.
+- Idle management: a `CLOCK_MONOTONIC` timerfd advances a timing wheel for idle control connections.
 - Configuration: `config/server.conf` and `config/client.conf`.
-- Logging: debug/info/warn/error log levels; server logs are written to `logs/server.log` by default.
-- Storage model: user-visible paths are stored in MySQL; physical file bytes are stored under `data/files/<sha256_hex>`, and interrupted uploads are stored under `data/.upload/<sha256_hex>.part`.
+- Logging: debug, info, warn, and error levels with separate client and server log files.
+- Storage: logical paths are stored in MySQL, file content is stored under `data/files/<sha256_hex>`, and interrupted uploads use `data/.upload/<sha256_hex>.part`.
 
 ## Implemented Features
 
-- The client connects to the server and supports registration/login before entering the command loop.
-- Supported commands: `pwd`, `cd`, `ls`, `mkdir`, `rmdir`, `rm`, `puts`, and `gets`.
-- Users and password hashes are stored in MySQL.
-- Each user's virtual directory tree is represented by the `paths` table.
-- Physical file metadata is represented by the `files` table.
-- Physical file content is addressed by SHA-256 hash and shared across users/paths when content is identical.
-- `puts <local-file>` supports instant upload when the same content hash already exists in the database.
-- `puts <local-file>` uploads a local file to the current remote directory and resumes from the server-side partial file size when interrupted.
-- `gets <remote-file>` resolves the remote path through database metadata, downloads the physical object into local `downloads/`, and resumes from the local partial file size when interrupted.
-- `rm <remote-file>` removes the logical path and deletes the physical file only when the file reference count reaches zero.
-- Large uploads use `mmap` when the remaining file size is larger than `FILE_OPTIMIZATION_THRESHOLD`.
-- Downloads are sent by the server with `sendfile` after the TLV packet header is written.
-- File transfer commands are handled as dedicated transfer tasks: the client fd is temporarily removed from epoll during transfer and added back after the transfer completes.
-- The server automatically creates missing database tables and configured storage directories during startup.
-- The server supports graceful Ctrl+C shutdown and cleans up the thread pool, epoll fd, log module, and related resources.
+- Registration and login with password hashes stored in MySQL.
+- Shell-like commands: `pwd`, `cd`, `ls`, `mkdir`, `rmdir`, `rm`, `puts`, and `gets`.
+- Per-user virtual directory trees backed by the `paths` table.
+- SHA-256 content-addressed storage and reference-counted physical files.
+- Instant upload when identical content already exists on the server.
+- Resumable upload from a server-side partial file and resumable download from a client-side partial file.
+- Download validation before the `.part` file is renamed to its final name.
+- A persistent control connection for authentication and short commands.
+- One independent TCP connection and background thread for each `puts` or `gets` task.
+- Configurable client-side transfer concurrency and socket timeouts.
+- A 128-bit random SessionID shared by all connections belonging to one login session.
+- Shared virtual cwd state across a session, with transfer paths snapshotted when a task is submitted.
+- Idle control-connection cleanup through a timerfd-driven timing wheel without interrupting authenticated transfers.
+- Control-socket recovery after disconnect: the client reconnects and returns to the login menu without automatically re-authenticating or replaying the failed command.
 
-## Build and Run
+Transfer connections are single-purpose. The server removes a transfer fd from epoll and the idle timing wheel after its first authenticated request, lets one worker own it for the transfer, and then detaches and closes it. Only a control fd is returned to epoll after a short command completes.
+
+## Build And Run
+
+The build requires GCC, pthreads, OpenSSL, `libcrypt`, and the MySQL/MariaDB client development library.
 
 ```bash
 make
@@ -42,37 +47,65 @@ make
 ./bin/client-cdd
 ```
 
-Before starting the server, create the MySQL database and configure the `[mysql]` section in `config/server.conf`:
+Before starting the server, create the database and configure the `[mysql]` section in `config/server.conf`:
 
 ```sql
 CREATE DATABASE cloud_drive_demo DEFAULT CHARACTER SET utf8mb4;
 ```
 
-The server creates missing tables during startup. Storage directories are configured by the `[storage]` section in `config/server.conf`:
+The server creates missing tables and configured storage directories during startup. The default storage and idle-control settings are:
 
 ```ini
+[storage]
 root_dir = data/files
 transfer_temp_dir = data/.upload
+
+[session]
+idle_timeout_seconds = 30
 ```
 
-By default, the server listens on `127.0.0.1:8888`, and the client connects to `127.0.0.1:8888`. These values can be changed through the configuration files.
+Client transfer limits and socket timeouts are configured in `config/client.conf`:
 
-## Demo Video
+```ini
+[transfer]
+max_concurrent = 4
+connect_timeout_ms = 5000
+io_timeout_ms = 30000
+```
+
+By default, the server listens on `127.0.0.1:8888`, and the client connects to the same address. Both values can be changed in the configuration files.
+
+## Tests
+
+Build and run the Phase 4 unit tests with:
+
+```bash
+make protocol-test session-test timer-wheel-test \
+  client-runtime-test client-connection-test client-command-test
+```
+
+These targets cover TLV2 SessionID framing, server session binding and lifecycle, idle timing-wheel behavior, client session snapshots, control-connection checks, and reconnect-result handling. The repository does not currently provide a single aggregate `make test` target.
+
+## Demo Videos
 
 [Phase 1 Usage Demo](https://github.com/user-attachments/assets/85da4ad5-ecd6-43ad-b71a-10fdc79ffe54)
 
 [Phase 3 Usage Demo](https://github.com/user-attachments/assets/20e2f894-3e03-406c-8735-2c968cfd451e)
 
-## Detailed Documentation
+## Documentation
 
-For Phase 1 technical details, source structure, module responsibilities, and basic protocol flows, see [docs/phase-1-basic.md](docs/phase-1-basic.md).
+- [Project overview and phase evolution](docs/overview.md)
+- [Phase 1 basic framework](docs/phase-1-basic.md)
+- [Phase 2 resumable transfers](docs/phase-2-resume.md)
+- [Phase 3 database-backed metadata](docs/phase-3-database.md)
+- [Phase 4 SessionID and connection lifecycle](docs/phase-4-session-id.md)
+- [Cross-phase implementation details](docs/details.md)
 
-For Phase 2 resumable transfer and large-file optimization details, see [docs/phase-2-resume.md](docs/phase-2-resume.md).
+The Phase 1-3 documents are historical phase records. Earlier connection-lifecycle and upload-optimization descriptions may differ from the current Phase 4 implementation.
 
-For Phase 3 database-backed metadata, content-addressed storage, DAO layering, instant upload, and reference-counted deletion details, see [docs/phase-3-database.md](docs/phase-3-database.md).
+## Current Limitations
 
-For cross-phase implementation details such as the thread pool, epoll dispatch, transfer task ownership, protocol helpers, and session management, see [docs/details.md](docs/details.md).
-
-For a high-level project overview, see [docs/overview.md](docs/overview.md).
-
-Related verification notes are available in [tests/resume-test.md](tests/resume-test.md) and [tests/mmap-test.md](tests/mmap-test.md).
+- SessionIDs are process-local bearer credentials and are not persisted across restarts.
+- There is no explicit logout, server-side revocation, or fixed SessionID expiry policy.
+- Transport is unencrypted TCP; TLS is not implemented.
+- The client reconnects a lost control socket but does not persist credentials, automatically log in again, or replay the failed command.

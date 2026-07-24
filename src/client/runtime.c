@@ -48,11 +48,18 @@ void client_runtime_destroy(client_runtime_t *runtime)
         runtime->transfers = NULL;
     }
 
+    client_runtime_disconnect_control(runtime);
+}
+
+void client_runtime_disconnect_control(client_runtime_t *runtime)
+{
+    if (runtime == NULL) {
+        return;
+    }
     if (runtime->control_fd >= 0) {
         client_connection_close(runtime->control_fd);
         runtime->control_fd = -1;
     }
-
     client_runtime_clear_session(runtime);
 }
 

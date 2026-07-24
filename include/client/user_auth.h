@@ -4,6 +4,7 @@
 
 enum {
     AUTH_OK = 0,
+    AUTH_CONNECTION_ERROR = 1,
     AUTH_EXIT = 2
 };
 

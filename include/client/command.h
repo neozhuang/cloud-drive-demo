@@ -5,6 +5,7 @@
 typedef enum {
     CLIENT_COMMAND_OK = 0,
     CLIENT_COMMAND_EXIT,
+    CLIENT_COMMAND_RECONNECT,
     CLIENT_COMMAND_ERROR
 } client_command_result_t;
 
